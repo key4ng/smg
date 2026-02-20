@@ -1,0 +1,214 @@
+use anyhow::Result;
+use openai_protocol::{messages::ListModelsResponse, worker::WorkerSpec};
+use serde::Deserialize;
+
+/// HTTP client for the SMG gateway REST API.
+#[derive(Debug, Clone)]
+pub struct SmgClient {
+    http: reqwest::Client,
+    gateway_url: String,
+    #[allow(dead_code)]
+    metrics_url: String,
+    api_key: Option<String>,
+}
+
+// ── Local response types matching the actual wire format ──
+// The server uses custom IntoResponse impls that produce JSON different from
+// the protocol structs' Serialize output, so we define our own Deserialize types.
+
+/// Mirrors the JSON produced by `ListWorkersResult::into_response` in model_gateway.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkersResponse {
+    pub workers: Vec<WorkerInfo>,
+    pub total: usize,
+    #[serde(default)]
+    pub stats: WorkerStatsWire,
+}
+
+/// Worker info as it appears on the wire (WorkerSpec fields are flattened).
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkerInfo {
+    pub id: String,
+    pub url: String,
+    #[serde(default)]
+    pub worker_type: String,
+    #[serde(default)]
+    pub connection_mode: String,
+    #[serde(default)]
+    pub runtime_type: String,
+    #[serde(default)]
+    pub models: Vec<ModelRef>,
+    #[serde(default)]
+    pub is_healthy: bool,
+    #[serde(default)]
+    pub load: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelRef {
+    pub id: String,
+}
+
+/// Stats block: `{ prefill_count, decode_count, regular_count }`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WorkerStatsWire {
+    #[serde(default)]
+    pub prefill_count: usize,
+    #[serde(default)]
+    pub decode_count: usize,
+    #[serde(default)]
+    pub regular_count: usize,
+}
+
+/// Mirrors the JSON from `WorkerLoadsResult::into_response`:
+/// `{ "workers": [{"worker": "...", "load": N}] }`
+#[derive(Debug, Clone, Deserialize)]
+pub struct LoadsResponse {
+    pub workers: Vec<WorkerLoad>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkerLoad {
+    pub worker: String,
+    pub load: isize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClusterStatusResponse {
+    pub node_name: Option<String>,
+    pub cluster_size: Option<usize>,
+    pub stores: Option<Vec<StoreStatus>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StoreStatus {
+    pub name: String,
+    pub healthy: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MeshHealthResponse {
+    pub status: String,
+    pub node_count: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RateLimitStats {
+    pub limit: Option<u64>,
+    pub current: Option<u64>,
+    pub remaining: Option<u64>,
+}
+
+impl SmgClient {
+    pub fn new(gateway_url: String, metrics_url: String, api_key: Option<String>) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("failed to build HTTP client");
+
+        Self {
+            http,
+            gateway_url,
+            metrics_url,
+            api_key,
+        }
+    }
+
+    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        let url = format!("{}{}", self.gateway_url, path);
+        let mut req = self.http.request(method, &url);
+        if let Some(key) = &self.api_key {
+            req = req.bearer_auth(key);
+        }
+        req
+    }
+
+    pub async fn check_health(&self) -> Result<()> {
+        self.request(reqwest::Method::GET, "/readiness")
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    pub async fn list_workers(&self) -> Result<WorkersResponse> {
+        Ok(self
+            .request(reqwest::Method::GET, "/workers")
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
+    pub async fn add_worker(&self, spec: &WorkerSpec) -> Result<serde_json::Value> {
+        Ok(self
+            .request(reqwest::Method::POST, "/workers")
+            .json(spec)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
+    pub async fn delete_worker(&self, id: &str) -> Result<serde_json::Value> {
+        Ok(self
+            .request(reqwest::Method::DELETE, &format!("/workers/{id}"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
+    pub async fn get_loads(&self) -> Result<LoadsResponse> {
+        Ok(self
+            .request(reqwest::Method::GET, "/get_loads")
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
+    pub async fn get_cluster_status(&self) -> Result<ClusterStatusResponse> {
+        Ok(self
+            .request(reqwest::Method::GET, "/ha/status")
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
+    pub async fn get_mesh_health(&self) -> Result<MeshHealthResponse> {
+        Ok(self
+            .request(reqwest::Method::GET, "/ha/health")
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
+    pub async fn get_rate_limit_stats(&self) -> Result<RateLimitStats> {
+        Ok(self
+            .request(reqwest::Method::GET, "/ha/rate-limit/stats")
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
+    pub async fn list_models(&self) -> Result<ListModelsResponse> {
+        Ok(self
+            .request(reqwest::Method::GET, "/v1/models")
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+}

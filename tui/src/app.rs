@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use crate::{
     client::SmgClient,
     event::{AppEvent, EventHandler},
-    playground::{ChatEndpoint, ChatMessage},
+    chat::{ChatEndpoint, ChatMessage},
     state::SharedState,
     types::{AddMenuState, ActionMenuItem, InputMode, ProviderPreset, View},
     ui,
@@ -534,7 +534,7 @@ impl App {
                 let model = self.chat_model.clone();
                 let endpoint = self.chat_endpoint;
                 tokio::spawn(async move {
-                    crate::playground::stream_chat(&client, &model, &api_messages, endpoint, tx).await;
+                    crate::chat::stream_chat(&client, &model, &api_messages, endpoint, tx).await;
                 });
             }
             // Esc cancels input or stops streaming

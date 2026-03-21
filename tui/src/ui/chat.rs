@@ -9,7 +9,7 @@ use ratatui::{
 use super::theme;
 use crate::app::App;
 
-pub fn render_playground(f: &mut Frame, app: &App, area: Rect) {
+pub fn render_chat(f: &mut Frame, app: &App, area: Rect) {
     // Layout: messages (fill) + input (3 lines)
     let [messages_area, input_area] = Layout::vertical([
         Constraint::Fill(1),

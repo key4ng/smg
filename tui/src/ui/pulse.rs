@@ -1,230 +1,337 @@
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Bar, BarChart, BarGroup, Block, Borders, Paragraph},
+    widgets::Paragraph,
     Frame,
 };
 
 use crate::app::App;
+use super::theme;
+use super::sparkline;
 
 pub fn render_pulse(f: &mut Frame, app: &App, area: Rect) {
-    let [top, bottom] =
-        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
-    let [tl, tr] =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(top);
-    let [bl, br] =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(bottom);
+    let columns = Layout::horizontal([
+        Constraint::Percentage(50),
+        Constraint::Percentage(50),
+    ])
+    .split(area);
+
+    let left = Layout::vertical([
+        Constraint::Ratio(1, 3),
+        Constraint::Ratio(1, 3),
+        Constraint::Ratio(1, 3),
+    ])
+    .split(columns[0]);
+
+    let right = Layout::vertical([
+        Constraint::Ratio(1, 3),
+        Constraint::Ratio(1, 3),
+        Constraint::Ratio(1, 3),
+    ])
+    .split(columns[1]);
 
     let state = app.state.read().unwrap();
 
-    render_workers_summary(f, &state, tl);
-    render_cluster_info(f, &state, tr);
-    render_rate_limits(f, &state, bl);
-    render_load_chart(f, &state, br);
+    render_worker_health(f, &state, left[0]);
+    render_cluster(f, &state, left[1]);
+    render_rate_limits(f, &state, left[2]);
+
+    render_throughput(f, &state, right[0]);
+    render_token_usage(f, &state, right[1]);
+    render_cache_hit(f, &state, right[2]);
 }
 
-fn render_workers_summary(f: &mut Frame, state: &crate::state::GatewayState, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Workers ")
-        .title_style(style_title());
+fn render_worker_health(f: &mut Frame, state: &crate::state::GatewayState, area: Rect) {
+    let block = theme::panel(" WORKER HEALTH ");
 
     let lines = if let Some(ref w) = state.workers {
-        let s = &w.stats;
         let healthy = w.workers.iter().filter(|w| w.is_healthy).count();
-        let total_load: usize = w.workers.iter().map(|w| w.load).sum();
-        vec![
+        let unhealthy = w.total.saturating_sub(healthy);
+        let s = &w.stats;
+
+        let mut lines = vec![
             Line::from(vec![
-                Span::styled("Total:    ", Style::default().fg(Color::Gray)),
-                Span::styled(w.total.to_string(), Style::default().fg(Color::White)),
+                Span::styled("Healthy:   ", theme::label()),
+                Span::styled(healthy.to_string(), theme::text().fg(theme::GREEN)),
             ]),
-            Line::from(vec![
-                Span::styled("Healthy:  ", Style::default().fg(Color::Gray)),
-                Span::styled(healthy.to_string(), Style::default().fg(Color::Green)),
-            ]),
-            Line::from(vec![
-                Span::styled("Load:     ", Style::default().fg(Color::Gray)),
-                Span::styled(total_load.to_string(), Style::default().fg(Color::White)),
-            ]),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("Regular:  ", Style::default().fg(Color::Gray)),
-                Span::styled(
-                    s.regular_count.to_string(),
-                    Style::default().fg(Color::White),
-                ),
-                Span::raw("  "),
-                Span::styled("Prefill: ", Style::default().fg(Color::Gray)),
-                Span::styled(
-                    s.prefill_count.to_string(),
-                    Style::default().fg(Color::White),
-                ),
-                Span::raw("  "),
-                Span::styled("Decode: ", Style::default().fg(Color::Gray)),
-                Span::styled(
-                    s.decode_count.to_string(),
-                    Style::default().fg(Color::White),
-                ),
-            ]),
-        ]
+        ];
+
+        if unhealthy > 0 {
+            lines.push(Line::from(vec![
+                Span::styled("Unhealthy: ", theme::label()),
+                Span::styled(unhealthy.to_string(), theme::text().fg(theme::RED)),
+            ]));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("BY TYPE  ", theme::label()),
+            Span::styled("regular: ", theme::label()),
+            Span::styled(s.regular_count.to_string(), theme::text()),
+            Span::styled("  prefill: ", theme::label()),
+            Span::styled(s.prefill_count.to_string(), theme::text()),
+            Span::styled("  decode: ", theme::label()),
+            Span::styled(s.decode_count.to_string(), theme::text()),
+        ]));
+
+        lines
     } else {
-        vec![Line::styled(
-            "No data",
-            Style::default().fg(Color::DarkGray),
-        )]
+        vec![Line::styled("No data", theme::label())]
     };
 
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-fn render_cluster_info(f: &mut Frame, state: &crate::state::GatewayState, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Cluster ")
-        .title_style(style_title());
+fn render_cluster(f: &mut Frame, state: &crate::state::GatewayState, area: Rect) {
+    let block = theme::panel(" CLUSTER ");
 
     let lines = if let Some(ref c) = state.cluster {
         let mut lines = vec![
             Line::from(vec![
-                Span::styled("Node:     ", Style::default().fg(Color::Gray)),
+                Span::styled("Node:  ", theme::label()),
                 Span::styled(
                     c.node_name.as_deref().unwrap_or("unknown"),
-                    Style::default().fg(Color::White),
+                    theme::text(),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Size:     ", Style::default().fg(Color::Gray)),
+                Span::styled("Size:  ", theme::label()),
                 Span::styled(
                     c.cluster_size
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| "-".into()),
-                    Style::default().fg(Color::White),
+                    theme::text(),
                 ),
             ]),
         ];
 
         if let Some(ref stores) = c.stores {
             lines.push(Line::from(""));
-            lines.push(Line::styled("Stores:", Style::default().fg(Color::Gray)));
+            lines.push(Line::styled("Stores:", theme::label()));
             for store in stores {
-                let (indicator, color) = if store.healthy {
-                    ("●", Color::Green)
-                } else {
-                    ("●", Color::Red)
-                };
+                let color = if store.healthy { theme::GREEN } else { theme::RED };
                 lines.push(Line::from(vec![
-                    Span::styled(format!("  {indicator} "), Style::default().fg(color)),
-                    Span::styled(&store.name, Style::default().fg(Color::White)),
+                    Span::styled("  ● ", ratatui::style::Style::default().fg(color)),
+                    Span::styled(&store.name, theme::text()),
                 ]));
             }
         }
+
         lines
     } else {
-        vec![Line::styled(
-            "No data",
-            Style::default().fg(Color::DarkGray),
-        )]
+        vec![Line::styled("No data", theme::label())]
     };
 
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn render_rate_limits(f: &mut Frame, state: &crate::state::GatewayState, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Rate Limiting ")
-        .title_style(style_title());
+    let block = theme::panel(" RATE LIMITS ");
 
     let lines = if let Some(ref r) = state.rate_limits {
         let limit = r.limit.unwrap_or(0);
         let current = r.current.unwrap_or(0);
         let remaining = r.remaining.unwrap_or(0);
 
-        let pct = if limit > 0 {
-            (current as f64 / limit as f64 * 100.0) as u16
+        let ratio = if limit > 0 {
+            current as f64 / limit as f64
         } else {
-            0
+            0.0
         };
-        let bar_width = 30u16;
-        let filled = (bar_width as f64 * pct as f64 / 100.0) as usize;
-        let empty = bar_width as usize - filled;
-        let bar_color = if pct > 80 {
-            Color::Red
-        } else if pct > 50 {
-            Color::Yellow
-        } else {
-            Color::Green
-        };
+
+        let severity_color = theme::severity(ratio);
+        let (filled, empty, pct) = sparkline::gauge_bar(ratio, 28);
 
         vec![
             Line::from(vec![
-                Span::styled("Limit:     ", Style::default().fg(Color::Gray)),
-                Span::styled(limit.to_string(), Style::default().fg(Color::White)),
+                Span::styled("Limit:     ", theme::label()),
+                Span::styled(limit.to_string(), theme::text()),
             ]),
             Line::from(vec![
-                Span::styled("Current:   ", Style::default().fg(Color::Gray)),
-                Span::styled(current.to_string(), Style::default().fg(Color::White)),
+                Span::styled("Current:   ", theme::label()),
+                Span::styled(current.to_string(), theme::text()),
             ]),
             Line::from(vec![
-                Span::styled("Remaining: ", Style::default().fg(Color::Gray)),
-                Span::styled(remaining.to_string(), Style::default().fg(Color::White)),
+                Span::styled("Remaining: ", theme::label()),
+                Span::styled(remaining.to_string(), theme::text()),
             ]),
             Line::from(""),
             Line::from(vec![
-                Span::styled("█".repeat(filled), Style::default().fg(bar_color)),
-                Span::styled("░".repeat(empty), Style::default().fg(Color::DarkGray)),
-                Span::styled(format!(" {pct}%"), Style::default().fg(Color::White)),
+                Span::styled(filled, ratatui::style::Style::default().fg(severity_color)),
+                Span::styled(empty, ratatui::style::Style::default().fg(theme::TEXT_MUTED)),
+                Span::styled(format!(" {pct}%"), theme::text()),
             ]),
         ]
     } else {
-        vec![Line::styled(
-            "No data",
-            Style::default().fg(Color::DarkGray),
-        )]
+        vec![Line::styled("No data", theme::label())]
     };
 
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-fn render_load_chart(f: &mut Frame, state: &crate::state::GatewayState, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Worker Loads ")
-        .title_style(style_title());
+fn render_throughput(f: &mut Frame, state: &crate::state::GatewayState, area: Rect) {
+    let block = theme::panel(" THROUGHPUT ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
 
-    if let Some(ref loads) = state.loads {
-        let bars: Vec<Bar> = loads
-            .workers
-            .iter()
-            .map(|w| {
-                let label = w.worker.rsplit('/').next().unwrap_or(&w.worker).to_string();
-                let value = w.load.max(0) as u64;
-                Bar::default()
-                    .value(value)
-                    .label(Line::from(label))
-                    .style(Style::default().fg(Color::Cyan))
-            })
-            .collect();
+    if state.throughput_history.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::styled("No data", theme::label())),
+            inner,
+        );
+        return;
+    }
 
-        let chart = BarChart::default()
-            .block(block)
-            .data(BarGroup::default().bars(&bars))
-            .bar_width(3)
-            .bar_gap(1)
-            .direction(ratatui::layout::Direction::Horizontal);
+    // Header: latest value
+    let latest = state.throughput_history.back().copied().unwrap_or(0.0);
+    let header_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: 1,
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Latest: ", theme::label()),
+            Span::styled(format!("{:.1} tok/s", latest), theme::text().fg(theme::GREEN)),
+        ])),
+        header_area,
+    );
 
-        f.render_widget(chart, area);
-    } else {
-        let paragraph = Paragraph::new("No data")
-            .block(block)
-            .style(Style::default().fg(Color::DarkGray));
-        f.render_widget(paragraph, area);
+    // Sparkline area
+    if inner.height > 2 {
+        let sparkline_area = Rect {
+            x: inner.x,
+            y: inner.y + 1,
+            width: inner.width,
+            height: inner.height.saturating_sub(2),
+        };
+        sparkline::render_sparkline(f, &state.throughput_history, theme::GREEN, sparkline_area);
+    }
+
+    // Time labels
+    if inner.height >= 2 {
+        let label_area = Rect {
+            x: inner.x,
+            y: inner.y + inner.height.saturating_sub(1),
+            width: inner.width,
+            height: 1,
+        };
+        let padding = " ".repeat(label_area.width.saturating_sub(7) as usize);
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("-60s", theme::label()),
+                Span::raw(padding),
+                Span::styled("now", theme::label()),
+            ])),
+            label_area,
+        );
     }
 }
 
-fn style_title() -> Style {
-    Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD)
+fn render_token_usage(f: &mut Frame, state: &crate::state::GatewayState, area: Rect) {
+    let block = theme::panel(" TOKEN USAGE BY WORKER ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let lines = if let Some(ref loads) = state.loads {
+        let bar_width = (inner.width.saturating_sub(20)) as usize;
+        let bar_width = bar_width.max(8);
+
+        loads
+            .workers
+            .iter()
+            .map(|wl| {
+                let ratio = wl
+                    .details
+                    .as_ref()
+                    .map(|d| d.effective_token_usage())
+                    .unwrap_or(0.0);
+
+                let name = wl.worker.rsplit('/').next().unwrap_or(&wl.worker);
+                let short_name = if name.len() > 14 {
+                    &name[..14]
+                } else {
+                    name
+                };
+
+                let color = theme::severity(ratio);
+                let (filled, empty, pct) = sparkline::gauge_bar(ratio, bar_width);
+
+                Line::from(vec![
+                    Span::styled(format!("{:<14} ", short_name), theme::text()),
+                    Span::styled(filled, ratatui::style::Style::default().fg(color)),
+                    Span::styled(empty, ratatui::style::Style::default().fg(theme::TEXT_MUTED)),
+                    Span::styled(format!(" {pct}%"), theme::label()),
+                ])
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![Line::styled("No data", theme::label())]
+    };
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_cache_hit(f: &mut Frame, state: &crate::state::GatewayState, area: Rect) {
+    let block = theme::panel(" CACHE HIT RATE ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if state.cache_hit_history.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::styled("No data", theme::label())),
+            inner,
+        );
+        return;
+    }
+
+    // Header: latest value
+    let latest = state.cache_hit_history.back().copied().unwrap_or(0.0);
+    let header_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: 1,
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Latest: ", theme::label()),
+            Span::styled(
+                format!("{:.1}%", latest * 100.0),
+                theme::text().fg(theme::PURPLE),
+            ),
+        ])),
+        header_area,
+    );
+
+    // Sparkline area
+    if inner.height > 2 {
+        let sparkline_area = Rect {
+            x: inner.x,
+            y: inner.y + 1,
+            width: inner.width,
+            height: inner.height.saturating_sub(2),
+        };
+        sparkline::render_sparkline(f, &state.cache_hit_history, theme::PURPLE, sparkline_area);
+    }
+
+    // Time labels
+    if inner.height >= 2 {
+        let label_area = Rect {
+            x: inner.x,
+            y: inner.y + inner.height.saturating_sub(1),
+            width: inner.width,
+            height: 1,
+        };
+        let padding = " ".repeat(label_area.width.saturating_sub(7) as usize);
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("-60s", theme::label()),
+                Span::raw(padding),
+                Span::styled("now", theme::label()),
+            ])),
+            label_area,
+        );
+    }
 }

@@ -34,7 +34,8 @@ struct Cli {
     #[arg(long, default_value_t = 3)]
     poll_interval: u64,
 
-    /// API key for authenticated endpoints (also reads SMG_API_KEY env var).
+    /// API key for authenticated endpoints.
+    /// Reads from: --api-key flag, SMG_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY env vars.
     #[arg(long, env = "SMG_API_KEY")]
     api_key: Option<String>,
 
@@ -53,10 +54,15 @@ async fn main() -> Result<()> {
         .with_env_filter("smg_tui=info")
         .init();
 
+    // Resolve API key: --api-key > SMG_API_KEY > OPENAI_API_KEY > ANTHROPIC_API_KEY
+    let api_key = cli.api_key.clone()
+        .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok());
+
     let client = SmgClient::new(
         cli.gateway_url.clone(),
         cli.metrics_url.clone(),
-        cli.api_key.clone(),
+        api_key,
     );
 
     // Auto-start gateway if requested and not reachable

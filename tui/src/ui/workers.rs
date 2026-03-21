@@ -25,19 +25,7 @@ pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
 
     let state = app.state.read().unwrap();
 
-    let header_cells = [
-        "ID", "URL", "Type", "Mode", "Runtime", "Models", "Health", "Load",
-    ]
-    .iter()
-    .map(|h| {
-        Cell::from(*h).style(
-            Style::default()
-                .fg(theme::ACCENT)
-                .bg(theme::PANEL_BG)
-                .add_modifier(Modifier::BOLD),
-        )
-    });
-    let header = Row::new(header_cells).height(1);
+    let width = table_area.width;
 
     let filtered: Vec<WorkerInfo> = if let Some(ref wl) = state.workers {
         wl.workers
@@ -49,9 +37,156 @@ pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
         vec![]
     };
 
-    let rows: Vec<Row> = filtered
+    // Build rows and table based on terminal width
+    let (header, rows, widths): (Row, Vec<Row>, Vec<Constraint>) = if width < 80 {
+        // Narrow: ID, Health, Load (3 columns)
+        let header_cells = ["ID", "Health", "Load"]
+            .iter()
+            .map(|h| {
+                Cell::from(*h).style(
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .bg(theme::PANEL_BG)
+                        .add_modifier(Modifier::BOLD),
+                )
+            });
+        let header = Row::new(header_cells).height(1);
+
+        let rows: Vec<Row> = filtered
+            .iter()
+            .map(|w| {
+                let health_style = if w.is_healthy {
+                    Style::default().fg(theme::GREEN)
+                } else {
+                    Style::default().fg(theme::RED)
+                };
+                let health_text = if w.is_healthy { "healthy" } else { "unhealthy" };
+
+                Row::new(vec![
+                    Cell::from(truncate(&w.id, 12)).style(Style::default().fg(theme::TEXT)),
+                    Cell::from(health_text).style(health_style),
+                    Cell::from(w.load.to_string()).style(Style::default().fg(theme::TEXT)),
+                ])
+                .style(Style::default().bg(theme::BG))
+            })
+            .collect();
+
+        let widths = vec![
+            Constraint::Fill(1),
+            Constraint::Length(10),
+            Constraint::Length(6),
+        ];
+
+        (header, rows, widths)
+    } else if width < 100 {
+        // Compact: ID, URL, Health, Load (4 columns)
+        let header_cells = ["ID", "URL", "Health", "Load"]
+            .iter()
+            .map(|h| {
+                Cell::from(*h).style(
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .bg(theme::PANEL_BG)
+                        .add_modifier(Modifier::BOLD),
+                )
+            });
+        let header = Row::new(header_cells).height(1);
+
+        let rows: Vec<Row> = filtered
+            .iter()
+            .map(|w| {
+                let health_style = if w.is_healthy {
+                    Style::default().fg(theme::GREEN)
+                } else {
+                    Style::default().fg(theme::RED)
+                };
+                let health_text = if w.is_healthy { "healthy" } else { "unhealthy" };
+
+                Row::new(vec![
+                    Cell::from(truncate(&w.id, 12)).style(Style::default().fg(theme::TEXT)),
+                    Cell::from(truncate(&w.url, 30)).style(Style::default().fg(theme::TEXT)),
+                    Cell::from(health_text).style(health_style),
+                    Cell::from(w.load.to_string()).style(Style::default().fg(theme::TEXT)),
+                ])
+                .style(Style::default().bg(theme::BG))
+            })
+            .collect();
+
+        let widths = vec![
+            Constraint::Length(14),
+            Constraint::Fill(1),
+            Constraint::Length(10),
+            Constraint::Length(6),
+        ];
+
+        (header, rows, widths)
+    } else if width < 120 {
+        // Medium: ID, URL, Type, Runtime, Health, Load (6 columns)
+        let header_cells = ["ID", "URL", "Type", "Runtime", "Health", "Load"]
+            .iter()
+            .map(|h| {
+                Cell::from(*h).style(
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .bg(theme::PANEL_BG)
+                        .add_modifier(Modifier::BOLD),
+                )
+            });
+        let header = Row::new(header_cells).height(1);
+
+        let rows: Vec<Row> = filtered
+            .iter()
+            .map(|w| {
+                let health_style = if w.is_healthy {
+                    Style::default().fg(theme::GREEN)
+                } else {
+                    Style::default().fg(theme::RED)
+                };
+                let health_text = if w.is_healthy { "healthy" } else { "unhealthy" };
+
+                Row::new(vec![
+                    Cell::from(truncate(&w.id, 12)).style(Style::default().fg(theme::TEXT)),
+                    Cell::from(truncate(&w.url, 30)).style(Style::default().fg(theme::TEXT)),
+                    Cell::from(w.worker_type.as_str())
+                        .style(Style::default().fg(theme::TEXT_MUTED)),
+                    Cell::from(w.runtime_type.as_str())
+                        .style(Style::default().fg(theme::TEXT_MUTED)),
+                    Cell::from(health_text).style(health_style),
+                    Cell::from(w.load.to_string()).style(Style::default().fg(theme::TEXT)),
+                ])
+                .style(Style::default().bg(theme::BG))
+            })
+            .collect();
+
+        let widths = vec![
+            Constraint::Length(14),
+            Constraint::Fill(1),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(6),
+        ];
+
+        (header, rows, widths)
+    } else {
+        // Full: all 8 columns (current)
+        let header_cells = [
+            "ID", "URL", "Type", "Mode", "Runtime", "Models", "Health", "Load",
+        ]
         .iter()
-        .map(|w| {
+        .map(|h| {
+            Cell::from(*h).style(
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .bg(theme::PANEL_BG)
+                    .add_modifier(Modifier::BOLD),
+            )
+        });
+        let header = Row::new(header_cells).height(1);
+
+        let rows: Vec<Row> = filtered
+            .iter()
+            .map(|w| {
                 let health_style = if w.is_healthy {
                     Style::default().fg(theme::GREEN)
                 } else {
@@ -89,18 +224,21 @@ pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
             })
             .collect();
 
-    let row_count = rows.len();
+        let widths = vec![
+            Constraint::Length(14),
+            Constraint::Fill(1),
+            Constraint::Length(10),
+            Constraint::Length(8),
+            Constraint::Length(10),
+            Constraint::Length(22),
+            Constraint::Length(10),
+            Constraint::Length(6),
+        ];
 
-    let widths = [
-        ratatui::layout::Constraint::Length(14),
-        ratatui::layout::Constraint::Fill(1),
-        ratatui::layout::Constraint::Length(10),
-        ratatui::layout::Constraint::Length(8),
-        ratatui::layout::Constraint::Length(10),
-        ratatui::layout::Constraint::Length(22),
-        ratatui::layout::Constraint::Length(10),
-        ratatui::layout::Constraint::Length(6),
-    ];
+        (header, rows, widths)
+    };
+
+    let row_count = rows.len();
 
     let table = Table::new(rows, widths)
         .header(header)

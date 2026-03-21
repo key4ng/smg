@@ -10,6 +10,24 @@ use super::theme;
 use super::sparkline;
 
 pub fn render_pulse(f: &mut Frame, app: &App, area: Rect) {
+    let width = area.width;
+
+    if width < 80 {
+        // Narrow: left column only, takes full width
+        let left = Layout::vertical([
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+        ])
+        .split(area);
+
+        let state = app.state.read().unwrap();
+        render_worker_health(f, &state, left[0]);
+        render_cluster(f, &state, left[1]);
+        render_rate_limits(f, &state, left[2]);
+        return;
+    }
+
     let columns = Layout::horizontal([
         Constraint::Percentage(50),
         Constraint::Percentage(50),
@@ -36,9 +54,17 @@ pub fn render_pulse(f: &mut Frame, app: &App, area: Rect) {
     render_cluster(f, &state, left[1]);
     render_rate_limits(f, &state, left[2]);
 
-    render_throughput(f, &state, right[0]);
-    render_token_usage(f, &state, right[1]);
-    render_cache_hit(f, &state, right[2]);
+    if width < 100 {
+        // Compact: right column with text numbers instead of sparklines
+        render_throughput_compact(f, &state, right[0]);
+        render_token_usage(f, &state, right[1]);
+        render_cache_hit_compact(f, &state, right[2]);
+    } else {
+        // Full layout with sparklines
+        render_throughput(f, &state, right[0]);
+        render_token_usage(f, &state, right[1]);
+        render_cache_hit(f, &state, right[2]);
+    }
 }
 
 fn render_worker_health(f: &mut Frame, state: &crate::state::GatewayState, area: Rect) {
@@ -229,6 +255,29 @@ fn render_throughput(f: &mut Frame, state: &crate::state::GatewayState, area: Re
     }
 }
 
+fn render_throughput_compact(f: &mut Frame, state: &crate::state::GatewayState, area: Rect) {
+    let block = theme::panel(" THROUGHPUT ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if state.throughput_history.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::styled("No data", theme::label())),
+            inner,
+        );
+        return;
+    }
+
+    let latest = state.throughput_history.back().copied().unwrap_or(0.0);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Latest: ", theme::label()),
+            Span::styled(format!("{:.1} tok/s", latest), theme::text().fg(theme::GREEN)),
+        ])),
+        inner,
+    );
+}
+
 fn render_token_usage(f: &mut Frame, state: &crate::state::GatewayState, area: Rect) {
     let block = theme::panel(" TOKEN USAGE BY WORKER ");
     let inner = block.inner(area);
@@ -334,4 +383,30 @@ fn render_cache_hit(f: &mut Frame, state: &crate::state::GatewayState, area: Rec
             label_area,
         );
     }
+}
+
+fn render_cache_hit_compact(f: &mut Frame, state: &crate::state::GatewayState, area: Rect) {
+    let block = theme::panel(" CACHE HIT RATE ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if state.cache_hit_history.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::styled("No data", theme::label())),
+            inner,
+        );
+        return;
+    }
+
+    let latest = state.cache_hit_history.back().copied().unwrap_or(0.0);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Latest: ", theme::label()),
+            Span::styled(
+                format!("{:.1}%", latest * 100.0),
+                theme::text().fg(theme::PURPLE),
+            ),
+        ])),
+        inner,
+    );
 }

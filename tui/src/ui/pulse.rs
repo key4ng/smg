@@ -71,36 +71,49 @@ fn render_worker_health(f: &mut Frame, state: &crate::state::GatewayState, area:
     let block = theme::panel(" WORKER HEALTH ");
 
     let lines = if let Some(ref w) = state.workers {
-        let healthy = w.workers.iter().filter(|w| w.is_healthy).count();
-        let unhealthy = w.total.saturating_sub(healthy);
-        let s = &w.stats;
+        w.workers
+            .iter()
+            .map(|worker| {
+                let (dot_color, status) = if worker.is_healthy {
+                    (theme::GREEN, "healthy")
+                } else {
+                    (theme::RED, "unhealthy")
+                };
 
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled("Healthy:   ", theme::label()),
-                Span::styled(healthy.to_string(), theme::text().fg(theme::GREEN)),
-            ]),
-        ];
+                // Short name from URL (e.g. "api.openai.com" from "https://api.openai.com/v1")
+                let name = worker
+                    .url
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .trim_end_matches('/')
+                    .split('/')
+                    .next()
+                    .unwrap_or(&worker.url);
 
-        if unhealthy > 0 {
-            lines.push(Line::from(vec![
-                Span::styled("Unhealthy: ", theme::label()),
-                Span::styled(unhealthy.to_string(), theme::text().fg(theme::RED)),
-            ]));
-        }
+                let rt = if worker.runtime_type.is_empty() {
+                    "unknown"
+                } else {
+                    &worker.runtime_type
+                };
 
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("BY TYPE  ", theme::label()),
-            Span::styled("regular: ", theme::label()),
-            Span::styled(s.regular_count.to_string(), theme::text()),
-            Span::styled("  prefill: ", theme::label()),
-            Span::styled(s.prefill_count.to_string(), theme::text()),
-            Span::styled("  decode: ", theme::label()),
-            Span::styled(s.decode_count.to_string(), theme::text()),
-        ]));
+                let status_style = if worker.is_healthy {
+                    ratatui::style::Style::default()
+                        .fg(theme::GREEN)
+                        .add_modifier(ratatui::style::Modifier::BOLD)
+                } else {
+                    ratatui::style::Style::default()
+                        .fg(theme::RED)
+                        .add_modifier(ratatui::style::Modifier::BOLD)
+                };
 
-        lines
+                Line::from(vec![
+                    Span::styled("● ", ratatui::style::Style::default().fg(dot_color)),
+                    Span::styled(format!("{name} "), theme::text()),
+                    Span::styled(format!("{rt} "), theme::label()),
+                    Span::styled(status, status_style),
+                ])
+            })
+            .collect()
     } else {
         vec![Line::styled("No data", theme::label())]
     };

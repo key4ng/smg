@@ -5,6 +5,8 @@ mod header;
 mod help;
 mod pulse;
 mod workers;
+pub mod sparkline;
+pub mod theme;
 
 use ratatui::{
     layout::{Constraint, Layout},

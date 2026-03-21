@@ -23,9 +23,9 @@ use crate::{app::App, types::View};
 pub fn render(f: &mut Frame, app: &App) {
     let state = app.state.read().unwrap();
 
-    // Layout: stats_bar (1) + tabs (1) + content (fill) + footer (2)
+    // Layout: stats_bar (5) + tabs (1) + content (fill) + footer (2)
     let [stats_area, tabs_area, content_area, footer_area] = Layout::vertical([
-        Constraint::Length(1),
+        Constraint::Length(5),
         Constraint::Length(1),
         Constraint::Fill(1),
         Constraint::Length(2),

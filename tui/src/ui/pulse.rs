@@ -11,20 +11,33 @@ use super::sparkline;
 
 pub fn render_pulse(f: &mut Frame, app: &App, area: Rect) {
     let width = area.width;
+    let state = app.state.read().unwrap();
+
+    // Determine which panels have data
+    let has_cluster = state.cluster.is_some();
+    let has_token_usage = state
+        .loads
+        .as_ref()
+        .map(|l| l.workers.iter().any(|w| w.details.is_some()))
+        .unwrap_or(false);
 
     if width < 80 {
-        // Narrow: left column only, takes full width
-        let left = Layout::vertical([
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
-        ])
-        .split(area);
+        // Narrow: single column
+        let mut constraints: Vec<Constraint> = vec![Constraint::Fill(1)]; // Worker Health
+        if has_cluster {
+            constraints.push(Constraint::Fill(1)); // Cluster
+        }
+        constraints.push(Constraint::Fill(1)); // Rate Limits
 
-        let state = app.state.read().unwrap();
-        render_worker_health(f, &state, left[0]);
-        render_cluster(f, &state, left[1]);
-        render_rate_limits(f, &state, left[2]);
+        let rows = Layout::vertical(constraints).split(area);
+        let mut i = 0;
+        render_worker_health(f, &state, rows[i]);
+        i += 1;
+        if has_cluster {
+            render_cluster(f, &state, rows[i]);
+            i += 1;
+        }
+        render_rate_limits(f, &state, rows[i]);
         return;
     }
 
@@ -34,36 +47,64 @@ pub fn render_pulse(f: &mut Frame, app: &App, area: Rect) {
     ])
     .split(area);
 
-    let left = Layout::vertical([
-        Constraint::Ratio(1, 3),
-        Constraint::Ratio(1, 3),
-        Constraint::Ratio(1, 3),
-    ])
-    .split(columns[0]);
-
-    let right = Layout::vertical([
-        Constraint::Ratio(1, 3),
-        Constraint::Ratio(1, 3),
-        Constraint::Ratio(1, 3),
-    ])
-    .split(columns[1]);
-
-    let state = app.state.read().unwrap();
-
-    render_worker_health(f, &state, left[0]);
-    render_cluster(f, &state, left[1]);
-    render_rate_limits(f, &state, left[2]);
-
-    if width < 100 {
-        // Compact: right column with text numbers instead of sparklines
-        render_throughput_compact(f, &state, right[0]);
-        render_token_usage(f, &state, right[1]);
-        render_cache_hit_compact(f, &state, right[2]);
+    // Left column: Worker Health + (Cluster if enabled) + Rate Limits
+    let left = if has_cluster {
+        Layout::vertical([
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+        ])
+        .split(columns[0])
     } else {
-        // Full layout with sparklines
+        Layout::vertical([
+            Constraint::Ratio(1, 2),
+            Constraint::Ratio(1, 2),
+        ])
+        .split(columns[0])
+    };
+
+    // Right column: Throughput + (Token Usage if available) + Cache Hit
+    let right = if has_token_usage {
+        Layout::vertical([
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+        ])
+        .split(columns[1])
+    } else {
+        Layout::vertical([
+            Constraint::Ratio(1, 2),
+            Constraint::Ratio(1, 2),
+        ])
+        .split(columns[1])
+    };
+
+    // Left panels
+    render_worker_health(f, &state, left[0]);
+    if has_cluster {
+        render_cluster(f, &state, left[1]);
+        render_rate_limits(f, &state, left[2]);
+    } else {
+        render_rate_limits(f, &state, left[1]);
+    }
+
+    // Right panels
+    if width < 100 {
+        render_throughput_compact(f, &state, right[0]);
+        if has_token_usage {
+            render_token_usage(f, &state, right[1]);
+            render_cache_hit_compact(f, &state, right[2]);
+        } else {
+            render_cache_hit_compact(f, &state, right[1]);
+        }
+    } else {
         render_throughput(f, &state, right[0]);
-        render_token_usage(f, &state, right[1]);
-        render_cache_hit(f, &state, right[2]);
+        if has_token_usage {
+            render_token_usage(f, &state, right[1]);
+            render_cache_hit(f, &state, right[2]);
+        } else {
+            render_cache_hit(f, &state, right[1]);
+        }
     }
 }
 

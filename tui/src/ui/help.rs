@@ -11,7 +11,7 @@ use crate::types::View;
 fn help_text(view: View) -> String {
     let mut text = String::from("\
 Navigation
-  1-5          Switch view (Pulse/Workers/Models/Traffic/Mesh)
+  1-4          Switch view (Pulse/Workers/Traffic/Mesh)
   q / Ctrl+C   Quit
   ?            Toggle this help
   /            Filter

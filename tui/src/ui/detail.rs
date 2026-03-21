@@ -66,7 +66,7 @@ fn render_config(f: &mut Frame, worker: &WorkerInfo, area: Rect) {
     };
     let health_text = if worker.is_healthy { "healthy" } else { "unhealthy" };
 
-    let lines: Vec<Line> = vec![
+    let mut lines: Vec<Line> = vec![
         Line::from(vec![
             Span::styled("Config", Style::default().fg(theme::ACCENT)),
         ]),
@@ -94,6 +94,31 @@ fn render_config(f: &mut Frame, worker: &WorkerInfo, area: Rect) {
             Span::styled(&worker.worker_type, Style::default().fg(theme::TEXT)),
         ]),
     ];
+
+    // Models served by this worker
+    if !worker.models.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("Models ({})", worker.models.len()),
+                Style::default().fg(theme::ACCENT),
+            ),
+        ]));
+        let max_models = area.height.saturating_sub(lines.len() as u16) as usize;
+        for (i, model) in worker.models.iter().enumerate() {
+            if i >= max_models {
+                lines.push(Line::from(vec![Span::styled(
+                    format!("  +{} more", worker.models.len() - i),
+                    Style::default().fg(theme::TEXT_MUTED),
+                )]));
+                break;
+            }
+            lines.push(Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(&model.id, Style::default().fg(theme::TEXT)),
+            ]));
+        }
+    }
 
     f.render_widget(Paragraph::new(lines), area);
 }

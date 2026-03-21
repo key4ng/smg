@@ -6,7 +6,6 @@ pub enum View {
     #[default]
     Pulse,
     Workers,
-    Models,
     Traffic,
     Mesh,
 }
@@ -17,9 +16,8 @@ impl View {
         match code {
             KeyCode::Char('1') => Some(Self::Pulse),
             KeyCode::Char('2') => Some(Self::Workers),
-            KeyCode::Char('3') => Some(Self::Models),
-            KeyCode::Char('4') => Some(Self::Traffic),
-            KeyCode::Char('5') => Some(Self::Mesh),
+            KeyCode::Char('3') => Some(Self::Traffic),
+            KeyCode::Char('4') => Some(Self::Mesh),
             _ => None,
         }
     }
@@ -29,7 +27,6 @@ impl View {
         match self {
             Self::Pulse => "Pulse",
             Self::Workers => "Workers",
-            Self::Models => "Models",
             Self::Traffic => "Traffic",
             Self::Mesh => "Mesh",
         }
@@ -40,7 +37,6 @@ impl View {
         &[
             Self::Pulse,
             Self::Workers,
-            Self::Models,
             Self::Traffic,
             Self::Mesh,
         ]
@@ -51,9 +47,8 @@ impl View {
         match self {
             Self::Pulse => 1,
             Self::Workers => 2,
-            Self::Models => 3,
-            Self::Traffic => 4,
-            Self::Mesh => 5,
+            Self::Traffic => 3,
+            Self::Mesh => 4,
         }
     }
 }

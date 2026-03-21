@@ -48,7 +48,6 @@ pub fn render(f: &mut Frame, app: &App) {
     match app.view {
         View::Pulse => pulse::render_pulse(f, app, content_area),
         View::Workers => workers::render_workers(f, app, content_area),
-        View::Models => models::render_models(f, app, content_area),
         View::Traffic | View::Mesh => {
             render_placeholder(f, app.view, content_area);
         }

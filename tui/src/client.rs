@@ -1,5 +1,8 @@
 use anyhow::Result;
-use openai_protocol::{messages::ListModelsResponse, worker::WorkerSpec};
+use openai_protocol::{
+    messages::ListModelsResponse,
+    worker::{WorkerLoadResponse, WorkerSpec, WorkerUpdateRequest},
+};
 use serde::Deserialize;
 
 /// HTTP client for the SMG gateway REST API.
@@ -67,10 +70,14 @@ pub struct LoadsResponse {
     pub workers: Vec<WorkerLoad>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct WorkerLoad {
     pub worker: String,
+    #[serde(default)]
+    pub worker_type: Option<String>,
     pub load: isize,
+    #[serde(default)]
+    pub details: Option<WorkerLoadResponse>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -210,5 +217,32 @@ impl SmgClient {
             .error_for_status()?
             .json()
             .await?)
+    }
+
+    pub async fn update_worker(
+        &self,
+        id: &str,
+        update: &WorkerUpdateRequest,
+    ) -> Result<serde_json::Value> {
+        let resp = self
+            .request(reqwest::Method::PATCH, &format!("/workers/{id}"))
+            .json(update)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn flush_worker_cache(&self, id: &str) -> Result<serde_json::Value> {
+        let resp = self
+            .request(reqwest::Method::POST, &format!("/workers/{id}/flush_cache"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(resp)
     }
 }

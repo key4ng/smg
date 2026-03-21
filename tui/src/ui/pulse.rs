@@ -15,9 +15,9 @@ pub fn render_pulse(f: &mut Frame, app: &App, area: Rect) {
     if width < 80 {
         // Narrow: left column only, takes full width
         let left = Layout::vertical([
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
+            Constraint::Length(7),  // Worker Health (compact)
+            Constraint::Length(8),  // Cluster (compact)
+            Constraint::Fill(1),   // Rate Limits (fill)
         ])
         .split(area);
 
@@ -34,17 +34,19 @@ pub fn render_pulse(f: &mut Frame, app: &App, area: Rect) {
     ])
     .split(area);
 
+    // Left: compact info panels on top, fill remaining for rate limits
     let left = Layout::vertical([
-        Constraint::Ratio(1, 3),
-        Constraint::Ratio(1, 3),
-        Constraint::Ratio(1, 3),
+        Constraint::Length(7),   // Worker Health — ~5 lines + border
+        Constraint::Length(8),   // Cluster — ~6 lines + border
+        Constraint::Fill(1),    // Rate Limits — fill remaining
     ])
     .split(columns[0]);
 
+    // Right: throughput sparkline, token usage bars, cache hit sparkline
     let right = Layout::vertical([
-        Constraint::Ratio(1, 3),
-        Constraint::Ratio(1, 3),
-        Constraint::Ratio(1, 3),
+        Constraint::Fill(1),    // Throughput sparkline (fill)
+        Constraint::Length(10), // Token Usage — scales with worker count
+        Constraint::Fill(1),    // Cache Hit sparkline (fill)
     ])
     .split(columns[1]);
 

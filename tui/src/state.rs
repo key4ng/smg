@@ -37,6 +37,20 @@ pub struct GatewayState {
     pub prev_request_count: Option<u64>,
     /// Rolling requests-per-second history (for external workers without gen_throughput).
     pub requests_per_sec_history: VecDeque<f64>,
+
+    /// GPU information from nvidia-smi (None if not available).
+    pub gpus: Option<Vec<GpuInfo>>,
+}
+
+/// GPU information parsed from nvidia-smi.
+#[derive(Debug, Clone)]
+pub struct GpuInfo {
+    pub index: u32,
+    pub name: String,
+    pub memory_used_mb: u64,
+    pub memory_total_mb: u64,
+    pub utilization_pct: u32,
+    pub temperature_c: u32,
 }
 
 /// Thread-safe shared handle to the gateway state.
@@ -54,6 +68,44 @@ pub fn spawn_poller(client: SmgClient, state: SharedState, interval_secs: u64) {
     });
 }
 
+/// Query nvidia-smi for GPU information. Returns None if nvidia-smi is not available.
+async fn query_gpus() -> Option<Vec<GpuInfo>> {
+    let output = tokio::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let gpus: Vec<GpuInfo> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+            if parts.len() < 6 {
+                return None;
+            }
+            Some(GpuInfo {
+                index: parts[0].parse().ok()?,
+                name: parts[1].to_string(),
+                memory_used_mb: parts[2].parse().ok()?,
+                memory_total_mb: parts[3].parse().ok()?,
+                utilization_pct: parts[4].parse().ok()?,
+                temperature_c: parts[5].parse().ok()?,
+            })
+        })
+        .collect();
+
+    if gpus.is_empty() { None } else { Some(gpus) }
+}
+
 /// Parse total request count from Prometheus metrics text.
 fn parse_request_count(metrics_text: &str) -> u64 {
     metrics_text
@@ -68,7 +120,7 @@ fn parse_request_count(metrics_text: &str) -> u64 {
 
 async fn poll_once(client: &SmgClient, state: &SharedState, interval_secs: u64) {
     // Fire all requests concurrently.
-    let (health, workers, loads, cluster, mesh, rates, models, metrics) = tokio::join!(
+    let (health, workers, loads, cluster, mesh, rates, models, metrics, gpus) = tokio::join!(
         client.check_health(),
         client.list_workers(),
         client.get_loads(),
@@ -77,6 +129,7 @@ async fn poll_once(client: &SmgClient, state: &SharedState, interval_secs: u64) 
         client.get_rate_limit_stats(),
         client.list_models(),
         client.fetch_metrics(),
+        query_gpus(),
     );
 
     let mut s = state.write().unwrap();
@@ -114,6 +167,7 @@ async fn poll_once(client: &SmgClient, state: &SharedState, interval_secs: u64) 
     if let Ok(m) = models {
         s.models = Some(m);
     }
+    s.gpus = gpus;
 
     s.last_updated = Some(Utc::now());
 

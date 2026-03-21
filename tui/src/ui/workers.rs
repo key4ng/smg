@@ -1,21 +1,15 @@
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Cell, Row, Table, TableState},
+    style::{Modifier, Style},
+    widgets::{Cell, Row, Table, TableState},
     Frame,
 };
 
+use super::theme;
 use crate::{app::App, client::WorkerInfo};
 
 pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Workers ")
-        .title_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        );
+    let block = theme::panel(" Workers ");
 
     let state = app.state.read().unwrap();
 
@@ -23,7 +17,14 @@ pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
         "ID", "URL", "Type", "Mode", "Runtime", "Models", "Health", "Load",
     ]
     .iter()
-    .map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow)));
+    .map(|h| {
+        Cell::from(*h).style(
+            Style::default()
+                .fg(theme::ACCENT)
+                .bg(theme::PANEL_BG)
+                .add_modifier(Modifier::BOLD),
+        )
+    });
     let header = Row::new(header_cells).height(1);
 
     let rows: Vec<Row> = if let Some(ref wl) = state.workers {
@@ -32,9 +33,9 @@ pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
             .filter(|w| matches_filter(w, &app.active_filter))
             .map(|w| {
                 let health_style = if w.is_healthy {
-                    Style::default().fg(Color::Green)
+                    Style::default().fg(theme::GREEN)
                 } else {
-                    Style::default().fg(Color::Red)
+                    Style::default().fg(theme::RED)
                 };
                 let health_text = if w.is_healthy { "healthy" } else { "unhealthy" };
 
@@ -51,15 +52,20 @@ pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
                 };
 
                 Row::new(vec![
-                    Cell::from(truncate(&w.id, 12)),
-                    Cell::from(truncate(&w.url, 30)),
-                    Cell::from(w.worker_type.as_str()),
-                    Cell::from(w.connection_mode.as_str()),
-                    Cell::from(w.runtime_type.as_str()),
-                    Cell::from(truncate(&models_display, 20)),
+                    Cell::from(truncate(&w.id, 12)).style(Style::default().fg(theme::TEXT)),
+                    Cell::from(truncate(&w.url, 30)).style(Style::default().fg(theme::TEXT)),
+                    Cell::from(w.worker_type.as_str())
+                        .style(Style::default().fg(theme::TEXT_MUTED)),
+                    Cell::from(w.connection_mode.as_str())
+                        .style(Style::default().fg(theme::TEXT_MUTED)),
+                    Cell::from(w.runtime_type.as_str())
+                        .style(Style::default().fg(theme::TEXT_MUTED)),
+                    Cell::from(truncate(&models_display, 20))
+                        .style(Style::default().fg(theme::TEXT)),
                     Cell::from(health_text).style(health_style),
-                    Cell::from(w.load.to_string()),
+                    Cell::from(w.load.to_string()).style(Style::default().fg(theme::TEXT)),
                 ])
+                .style(Style::default().bg(theme::BG))
             })
             .collect()
     } else {
@@ -84,8 +90,9 @@ pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
         .block(block)
         .row_highlight_style(
             Style::default()
-                .add_modifier(Modifier::REVERSED)
-                .fg(Color::White),
+                .fg(theme::TEXT)
+                .bg(theme::BORDER)
+                .add_modifier(Modifier::BOLD),
         );
 
     // Build TableState from app's selected_index

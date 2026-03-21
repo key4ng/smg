@@ -1,0 +1,179 @@
+<h2>Color Theme</h2>
+<p class="subtitle">Which palette feels right for a professional monitoring dashboard? Click to select.</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Tokyo Night</h3>
+      <p>Cool blues and purples on deep navy. Popular in modern dev tools. Calm, easy on the eyes for long sessions.</p>
+      <div class="mockup" style="margin-top: 12px;">
+        <div class="mockup-body" style="font-family: monospace; font-size: 11px; line-height: 1.5; background: #1a1b26; color: #a9b1d6; padding: 10px;">
+          <div style="background: #24283b; padding: 4px 8px; display: flex; justify-content: space-between;">
+            <span style="color: #7aa2f7; font-weight: bold;">⎔ SMG</span>
+            <span style="color: #9ece6a;">● connected</span>
+          </div>
+          <div style="display: flex; gap: 0; background: #1e2030; border-bottom: 1px solid #3b4261; margin-top: 1px;">
+            <div style="flex: 1; padding: 5px 8px; text-align: center; border-right: 1px solid #3b4261;">
+              <div style="color: #565f89; font-size: 9px;">WORKERS</div>
+              <div style="color: #c0caf5; font-weight: bold; font-size: 14px;">12</div>
+              <div style="color: #9ece6a; font-size: 9px;">all healthy</div>
+            </div>
+            <div style="flex: 1; padding: 5px 8px; text-align: center; border-right: 1px solid #3b4261;">
+              <div style="color: #565f89; font-size: 9px;">MODELS</div>
+              <div style="color: #c0caf5; font-weight: bold; font-size: 14px;">4</div>
+            </div>
+            <div style="flex: 1; padding: 5px 8px; text-align: center; border-right: 1px solid #3b4261;">
+              <div style="color: #565f89; font-size: 9px;">THROUGHPUT</div>
+              <div style="color: #c0caf5; font-weight: bold; font-size: 14px;">1.2k</div>
+            </div>
+            <div style="flex: 1; padding: 5px 8px; text-align: center;">
+              <div style="color: #565f89; font-size: 9px;">AVG LOAD</div>
+              <div style="color: #e0af68; font-weight: bold; font-size: 14px;">67%</div>
+              <div><span style="color: #e0af68;">████</span><span style="color: #3b4261;">██</span></div>
+            </div>
+          </div>
+          <div style="padding: 3px 8px; background: #24283b; border-bottom: 1px solid #3b4261;">
+            <span style="color: #7aa2f7; border-bottom: 2px solid #7aa2f7; padding: 2px 6px;">Pulse</span>
+            <span style="color: #565f89; padding: 2px 6px;">Workers</span>
+            <span style="color: #565f89; padding: 2px 6px;">Models</span>
+          </div>
+          <div style="padding: 8px;">
+            <div style="display: flex; gap: 8px;">
+              <div style="flex: 1; border: 1px solid #3b4261; border-radius: 4px; padding: 8px;">
+                <div style="color: #7aa2f7; font-size: 9px; margin-bottom: 4px;">WORKER HEALTH</div>
+                <div><span style="color: #9ece6a;">●</span> worker-01 <span style="color: #565f89;">sglang</span> <span style="color: #9ece6a;">healthy</span></div>
+                <div><span style="color: #9ece6a;">●</span> worker-02 <span style="color: #565f89;">vllm</span> <span style="color: #9ece6a;">healthy</span></div>
+                <div><span style="color: #f7768e;">●</span> worker-03 <span style="color: #565f89;">external</span> <span style="color: #f7768e;">unhealthy</span></div>
+              </div>
+              <div style="flex: 1; border: 1px solid #3b4261; border-radius: 4px; padding: 8px;">
+                <div style="color: #7aa2f7; font-size: 9px; margin-bottom: 4px;">TOKEN USAGE</div>
+                <div>worker-01 <span style="color: #9ece6a;">▓▓▓▓▓▓▓▓</span><span style="color: #3b4261;">▓▓▓▓▓▓▓▓</span> 45%</div>
+                <div>worker-02 <span style="color: #e0af68;">▓▓▓▓▓▓▓▓▓▓▓▓</span><span style="color: #3b4261;">▓▓▓▓</span> 78%</div>
+                <div>worker-03 <span style="color: #f7768e;">▓▓▓▓▓▓▓▓▓▓▓▓▓▓</span><span style="color: #3b4261;">▓▓</span> 92%</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Catppuccin Mocha</h3>
+      <p>Warm muted tones on dark chocolate. Softer contrast, pastel accents. Trendy in modern terminal apps.</p>
+      <div class="mockup" style="margin-top: 12px;">
+        <div class="mockup-body" style="font-family: monospace; font-size: 11px; line-height: 1.5; background: #1e1e2e; color: #cdd6f4; padding: 10px;">
+          <div style="background: #313244; padding: 4px 8px; display: flex; justify-content: space-between;">
+            <span style="color: #89b4fa; font-weight: bold;">⎔ SMG</span>
+            <span style="color: #a6e3a1;">● connected</span>
+          </div>
+          <div style="display: flex; gap: 0; background: #181825; border-bottom: 1px solid #45475a; margin-top: 1px;">
+            <div style="flex: 1; padding: 5px 8px; text-align: center; border-right: 1px solid #45475a;">
+              <div style="color: #6c7086; font-size: 9px;">WORKERS</div>
+              <div style="color: #cdd6f4; font-weight: bold; font-size: 14px;">12</div>
+              <div style="color: #a6e3a1; font-size: 9px;">all healthy</div>
+            </div>
+            <div style="flex: 1; padding: 5px 8px; text-align: center; border-right: 1px solid #45475a;">
+              <div style="color: #6c7086; font-size: 9px;">MODELS</div>
+              <div style="color: #cdd6f4; font-weight: bold; font-size: 14px;">4</div>
+            </div>
+            <div style="flex: 1; padding: 5px 8px; text-align: center; border-right: 1px solid #45475a;">
+              <div style="color: #6c7086; font-size: 9px;">THROUGHPUT</div>
+              <div style="color: #cdd6f4; font-weight: bold; font-size: 14px;">1.2k</div>
+            </div>
+            <div style="flex: 1; padding: 5px 8px; text-align: center;">
+              <div style="color: #6c7086; font-size: 9px;">AVG LOAD</div>
+              <div style="color: #f9e2af; font-weight: bold; font-size: 14px;">67%</div>
+              <div><span style="color: #f9e2af;">████</span><span style="color: #45475a;">██</span></div>
+            </div>
+          </div>
+          <div style="padding: 3px 8px; background: #313244; border-bottom: 1px solid #45475a;">
+            <span style="color: #89b4fa; border-bottom: 2px solid #89b4fa; padding: 2px 6px;">Pulse</span>
+            <span style="color: #6c7086; padding: 2px 6px;">Workers</span>
+            <span style="color: #6c7086; padding: 2px 6px;">Models</span>
+          </div>
+          <div style="padding: 8px;">
+            <div style="display: flex; gap: 8px;">
+              <div style="flex: 1; border: 1px solid #45475a; border-radius: 4px; padding: 8px;">
+                <div style="color: #89b4fa; font-size: 9px; margin-bottom: 4px;">WORKER HEALTH</div>
+                <div><span style="color: #a6e3a1;">●</span> worker-01 <span style="color: #6c7086;">sglang</span> <span style="color: #a6e3a1;">healthy</span></div>
+                <div><span style="color: #a6e3a1;">●</span> worker-02 <span style="color: #6c7086;">vllm</span> <span style="color: #a6e3a1;">healthy</span></div>
+                <div><span style="color: #f38ba8;">●</span> worker-03 <span style="color: #6c7086;">external</span> <span style="color: #f38ba8;">unhealthy</span></div>
+              </div>
+              <div style="flex: 1; border: 1px solid #45475a; border-radius: 4px; padding: 8px;">
+                <div style="color: #89b4fa; font-size: 9px; margin-bottom: 4px;">TOKEN USAGE</div>
+                <div>worker-01 <span style="color: #a6e3a1;">▓▓▓▓▓▓▓▓</span><span style="color: #45475a;">▓▓▓▓▓▓▓▓</span> 45%</div>
+                <div>worker-02 <span style="color: #f9e2af;">▓▓▓▓▓▓▓▓▓▓▓▓</span><span style="color: #45475a;">▓▓▓▓</span> 78%</div>
+                <div>worker-03 <span style="color: #f38ba8;">▓▓▓▓▓▓▓▓▓▓▓▓▓▓</span><span style="color: #45475a;">▓▓</span> 92%</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Terminal Native (Recommended)</h3>
+      <p>Use standard ANSI 16 colors that adapt to the user's terminal theme. Works with any color scheme (Dracula, Solarized, Gruvbox, etc). Most professional — respects user preferences.</p>
+      <div class="mockup" style="margin-top: 12px;">
+        <div class="mockup-body" style="font-family: monospace; font-size: 11px; line-height: 1.5; background: #282c34; color: #abb2bf; padding: 10px;">
+          <div style="background: #3e4451; padding: 4px 8px; display: flex; justify-content: space-between;">
+            <span style="color: #61afef; font-weight: bold;">⎔ SMG</span>
+            <span style="color: #98c379;">● connected</span>
+          </div>
+          <div style="display: flex; gap: 0; background: #21252b; border-bottom: 1px solid #3e4451; margin-top: 1px;">
+            <div style="flex: 1; padding: 5px 8px; text-align: center; border-right: 1px solid #3e4451;">
+              <div style="color: #5c6370; font-size: 9px;">WORKERS</div>
+              <div style="color: #abb2bf; font-weight: bold; font-size: 14px;">12</div>
+              <div style="color: #98c379; font-size: 9px;">all healthy</div>
+            </div>
+            <div style="flex: 1; padding: 5px 8px; text-align: center; border-right: 1px solid #3e4451;">
+              <div style="color: #5c6370; font-size: 9px;">MODELS</div>
+              <div style="color: #abb2bf; font-weight: bold; font-size: 14px;">4</div>
+            </div>
+            <div style="flex: 1; padding: 5px 8px; text-align: center; border-right: 1px solid #3e4451;">
+              <div style="color: #5c6370; font-size: 9px;">THROUGHPUT</div>
+              <div style="color: #abb2bf; font-weight: bold; font-size: 14px;">1.2k</div>
+            </div>
+            <div style="flex: 1; padding: 5px 8px; text-align: center;">
+              <div style="color: #5c6370; font-size: 9px;">AVG LOAD</div>
+              <div style="color: #e5c07b; font-weight: bold; font-size: 14px;">67%</div>
+              <div><span style="color: #e5c07b;">████</span><span style="color: #3e4451;">██</span></div>
+            </div>
+          </div>
+          <div style="padding: 3px 8px; background: #3e4451; border-bottom: 1px solid #4b5263;">
+            <span style="color: #61afef; border-bottom: 2px solid #61afef; padding: 2px 6px;">Pulse</span>
+            <span style="color: #5c6370; padding: 2px 6px;">Workers</span>
+            <span style="color: #5c6370; padding: 2px 6px;">Models</span>
+          </div>
+          <div style="padding: 8px;">
+            <div style="display: flex; gap: 8px;">
+              <div style="flex: 1; border: 1px solid #3e4451; border-radius: 4px; padding: 8px;">
+                <div style="color: #61afef; font-size: 9px; margin-bottom: 4px;">WORKER HEALTH</div>
+                <div><span style="color: #98c379;">●</span> worker-01 <span style="color: #5c6370;">sglang</span> <span style="color: #98c379;">healthy</span></div>
+                <div><span style="color: #98c379;">●</span> worker-02 <span style="color: #5c6370;">vllm</span> <span style="color: #98c379;">healthy</span></div>
+                <div><span style="color: #e06c75;">●</span> worker-03 <span style="color: #5c6370;">external</span> <span style="color: #e06c75;">unhealthy</span></div>
+              </div>
+              <div style="flex: 1; border: 1px solid #3e4451; border-radius: 4px; padding: 8px;">
+                <div style="color: #61afef; font-size: 9px; margin-bottom: 4px;">TOKEN USAGE</div>
+                <div>worker-01 <span style="color: #98c379;">▓▓▓▓▓▓▓▓</span><span style="color: #3e4451;">▓▓▓▓▓▓▓▓</span> 45%</div>
+                <div>worker-02 <span style="color: #e5c07b;">▓▓▓▓▓▓▓▓▓▓▓▓</span><span style="color: #3e4451;">▓▓▓▓</span> 78%</div>
+                <div>worker-03 <span style="color: #e06c75;">▓▓▓▓▓▓▓▓▓▓▓▓▓▓</span><span style="color: #3e4451;">▓▓</span> 92%</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="pros-cons" style="margin-top: 8px;">
+        <div class="pros"><h4>Pros</h4><ul><li>Adapts to user's existing terminal theme</li><li>No hardcoded RGB values — uses Color::Blue, Color::Green, etc.</li><li>Professional convention (k9s, lazygit, htop all do this)</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>Less control over exact appearance</li><li>Some terminal themes may have poor contrast</li></ul></div>
+      </div>
+    </div>
+  </div>
+</div>

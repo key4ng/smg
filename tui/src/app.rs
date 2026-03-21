@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use crate::{
     client::SmgClient,
     event::{AppEvent, EventHandler},
-    playground::ChatMessage,
+    playground::{ChatEndpoint, ChatMessage},
     state::SharedState,
     types::{AddMenuState, ActionMenuItem, InputMode, ProviderPreset, View},
     ui,
@@ -33,12 +33,13 @@ pub struct App {
     pub confirm_flush: Option<(String, String)>,
 
     // Playground state
-    pub playground_messages: Vec<ChatMessage>,
-    pub playground_input: String,
-    pub playground_model: String,
-    pub playground_streaming: bool,
-    pub playground_scroll: u16,
-    playground_stream_rx: Option<mpsc::UnboundedReceiver<String>>,
+    pub chat_messages: Vec<ChatMessage>,
+    pub chat_input: String,
+    pub chat_model: String,
+    pub chat_streaming: bool,
+    pub chat_scroll: u16,
+    pub chat_endpoint: ChatEndpoint,
+    chat_stream_rx: Option<mpsc::UnboundedReceiver<String>>,
 
     status_clear_at: Option<std::time::Instant>,
 }
@@ -62,12 +63,13 @@ impl App {
             action_menu_index: 0,
             add_menu_state: None,
             confirm_flush: None,
-            playground_messages: Vec::new(),
-            playground_input: String::new(),
-            playground_model: "gpt-4o-mini".to_string(),
-            playground_streaming: false,
-            playground_scroll: 0,
-            playground_stream_rx: None,
+            chat_messages: Vec::new(),
+            chat_input: String::new(),
+            chat_model: "gpt-4o-mini".to_string(),
+            chat_streaming: false,
+            chat_scroll: 0,
+            chat_endpoint: ChatEndpoint::default(),
+            chat_stream_rx: None,
             status_clear_at: None,
         }
     }
@@ -106,39 +108,39 @@ impl App {
         }
 
         // Drain streaming tokens from playground
-        if let Some(ref mut rx) = self.playground_stream_rx {
+        if let Some(ref mut rx) = self.chat_stream_rx {
             let mut got_data = false;
             loop {
                 match rx.try_recv() {
                     Ok(token) => {
                         got_data = true;
                         if token == "\n[DONE]" {
-                            self.playground_streaming = false;
-                            self.playground_stream_rx = None;
+                            self.chat_streaming = false;
+                            self.chat_stream_rx = None;
                             break;
                         } else if token.starts_with("\n[ERROR]") {
                             let err = token.trim_start_matches("\n[ERROR]").to_string();
-                            if let Some(msg) = self.playground_messages.last_mut() {
+                            if let Some(msg) = self.chat_messages.last_mut() {
                                 msg.content.push_str(&format!("\n[Error: {}]", err));
                             }
-                            self.playground_streaming = false;
-                            self.playground_stream_rx = None;
+                            self.chat_streaming = false;
+                            self.chat_stream_rx = None;
                             break;
-                        } else if let Some(msg) = self.playground_messages.last_mut() {
+                        } else if let Some(msg) = self.chat_messages.last_mut() {
                             msg.content.push_str(&token);
                         }
                     }
                     Err(mpsc::error::TryRecvError::Empty) => break,
                     Err(mpsc::error::TryRecvError::Disconnected) => {
-                        self.playground_streaming = false;
-                        self.playground_stream_rx = None;
+                        self.chat_streaming = false;
+                        self.chat_stream_rx = None;
                         break;
                     }
                 }
             }
             if got_data {
                 // Auto-scroll to bottom
-                self.playground_scroll = u16::MAX;
+                self.chat_scroll = u16::MAX;
             }
         }
     }
@@ -181,7 +183,7 @@ impl App {
 
         // Playground has its own input handling
         if self.view == View::Chat && self.input_mode == InputMode::Normal {
-            self.handle_playground_key(key).await;
+            self.handle_chat_key(key).await;
             return;
         }
 
@@ -465,52 +467,56 @@ impl App {
         }
     }
 
-    async fn handle_playground_key(&mut self, key: KeyEvent) {
+    async fn handle_chat_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('q') if !self.playground_streaming => {
+            KeyCode::Char('q') if !self.chat_streaming => {
                 self.should_quit = true;
             }
-            // Tab to cycle model
-            KeyCode::Tab if !self.playground_streaming => {
-                self.cycle_playground_model();
+            // Tab to cycle model, Backtab (Shift+Tab) to cycle endpoint
+            KeyCode::Tab if !self.chat_streaming => {
+                self.cycle_chat_model();
+            }
+            KeyCode::BackTab if !self.chat_streaming => {
+                self.chat_endpoint = self.chat_endpoint.cycle();
+                self.set_status(format!("Endpoint: /v1/{}", self.chat_endpoint.label()));
             }
             // Number keys for view switching (only when not typing)
             code @ (KeyCode::Char('1') | KeyCode::Char('2') | KeyCode::Char('4') | KeyCode::Char('5'))
-                if self.playground_input.is_empty() && !self.playground_streaming =>
+                if self.chat_input.is_empty() && !self.chat_streaming =>
             {
                 if let Some(v) = View::from_key(code) {
                     self.view = v;
                     self.selected_index = 0;
                 }
             }
-            KeyCode::Char('?') if self.playground_input.is_empty() && !self.playground_streaming => {
+            KeyCode::Char('?') if self.chat_input.is_empty() && !self.chat_streaming => {
                 self.show_help = !self.show_help;
             }
             // Enter sends the message
             KeyCode::Enter => {
-                if self.playground_streaming {
+                if self.chat_streaming {
                     return; // Don't send while streaming
                 }
-                let text = self.playground_input.trim().to_string();
+                let text = self.chat_input.trim().to_string();
                 if text.is_empty() {
                     return;
                 }
-                self.playground_input.clear();
-                self.playground_messages.push(ChatMessage {
+                self.chat_input.clear();
+                self.chat_messages.push(ChatMessage {
                     role: "user".to_string(),
                     content: text,
                 });
                 // Add empty assistant message that will be filled by streaming
-                self.playground_messages.push(ChatMessage {
+                self.chat_messages.push(ChatMessage {
                     role: "assistant".to_string(),
                     content: String::new(),
                 });
-                self.playground_streaming = true;
-                self.playground_scroll = u16::MAX;
+                self.chat_streaming = true;
+                self.chat_scroll = u16::MAX;
 
                 // Build messages for API
                 let api_messages: Vec<serde_json::Value> = self
-                    .playground_messages
+                    .chat_messages
                     .iter()
                     .filter(|m| !m.content.is_empty())
                     .map(|m| {
@@ -522,64 +528,81 @@ impl App {
                     .collect();
 
                 let (tx, rx) = mpsc::unbounded_channel();
-                self.playground_stream_rx = Some(rx);
+                self.chat_stream_rx = Some(rx);
 
                 let client = self.client.clone();
-                let model = self.playground_model.clone();
+                let model = self.chat_model.clone();
+                let endpoint = self.chat_endpoint;
                 tokio::spawn(async move {
-                    crate::playground::stream_chat(&client, &model, &api_messages, tx).await;
+                    crate::playground::stream_chat(&client, &model, &api_messages, endpoint, tx).await;
                 });
             }
             // Esc cancels input or stops streaming
             KeyCode::Esc => {
-                if self.playground_streaming {
-                    self.playground_streaming = false;
-                    self.playground_stream_rx = None;
-                    if let Some(msg) = self.playground_messages.last_mut() {
+                if self.chat_streaming {
+                    self.chat_streaming = false;
+                    self.chat_stream_rx = None;
+                    if let Some(msg) = self.chat_messages.last_mut() {
                         if msg.content.is_empty() {
-                            self.playground_messages.pop();
+                            self.chat_messages.pop();
                         }
                     }
-                } else if !self.playground_input.is_empty() {
-                    self.playground_input.clear();
+                } else if !self.chat_input.is_empty() {
+                    self.chat_input.clear();
                 }
             }
             KeyCode::Backspace => {
-                self.playground_input.pop();
+                self.chat_input.pop();
             }
             KeyCode::Char(c) => {
-                self.playground_input.push(c);
+                self.chat_input.push(c);
             }
             KeyCode::Up => {
-                self.playground_scroll = self.playground_scroll.saturating_sub(1);
+                self.chat_scroll = self.chat_scroll.saturating_sub(1);
             }
             KeyCode::Down => {
-                self.playground_scroll = self.playground_scroll.saturating_add(1);
+                self.chat_scroll = self.chat_scroll.saturating_add(1);
             }
             _ => {}
         }
     }
 
-    fn cycle_playground_model(&mut self) {
+    fn cycle_chat_model(&mut self) {
         let state = self.state.read().unwrap();
-        let models: Vec<String> = state
+
+        // Try /v1/models first, fall back to worker model lists
+        let mut models: Vec<String> = state
             .models
             .as_ref()
             .map(|m| m.data.iter().map(|d| d.id.clone()).collect())
             .unwrap_or_default();
+
+        if models.is_empty() {
+            // Collect models from workers
+            if let Some(ref workers) = state.workers {
+                for w in &workers.workers {
+                    for m in &w.models {
+                        if !models.contains(&m.id) {
+                            models.push(m.id.clone());
+                        }
+                    }
+                }
+            }
+        }
         drop(state);
 
         if models.is_empty() {
+            self.set_status("No models available".to_string());
             return;
         }
 
-        let current_idx = models.iter().position(|m| m == &self.playground_model);
+        let current_idx = models.iter().position(|m| m == &self.chat_model);
         let next_idx = match current_idx {
             Some(i) => (i + 1) % models.len(),
             None => 0,
         };
-        self.playground_model = models[next_idx].clone();
-        self.set_status(format!("Model: {}", self.playground_model));
+        self.chat_model = models[next_idx].clone();
+        self.set_status(format!("Model: {}", self.chat_model));
     }
 
     fn start_delete(&mut self) {

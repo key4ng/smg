@@ -1,0 +1,171 @@
+<h2>Pulse Dashboard Layout</h2>
+<p class="subtitle">The home screen — what you see first. Which arrangement communicates health best at a glance?</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>2-Column Panels (Recommended)</h3>
+      <p>Left column: health & workers summary. Right column: live metrics & charts. Clean separation between "what's the status" and "what's the performance."</p>
+      <div class="mockup" style="margin-top: 12px;">
+        <div class="mockup-body" style="font-family: monospace; font-size: 10px; line-height: 1.4; background: #1a1b26; color: #a9b1d6; padding: 0;">
+          <!-- Stats bar -->
+          <div style="display: flex; background: #1e2030; border-bottom: 1px solid #3b4261;">
+            <div style="flex: 1; padding: 4px 8px; text-align: center; border-right: 1px solid #3b4261;">
+              <span style="color: #565f89;">WORKERS </span><span style="color: #c0caf5; font-weight: bold;">12</span> <span style="color: #9ece6a; font-size: 9px;">▲</span>
+            </div>
+            <div style="flex: 1; padding: 4px 8px; text-align: center; border-right: 1px solid #3b4261;">
+              <span style="color: #565f89;">MODELS </span><span style="color: #c0caf5; font-weight: bold;">4</span>
+            </div>
+            <div style="flex: 1; padding: 4px 8px; text-align: center; border-right: 1px solid #3b4261;">
+              <span style="color: #565f89;">THROUGHPUT </span><span style="color: #c0caf5; font-weight: bold;">1.2k</span><span style="color: #565f89;"> tok/s</span>
+            </div>
+            <div style="flex: 1; padding: 4px 8px; text-align: center;">
+              <span style="color: #565f89;">LOAD </span><span style="color: #e0af68; font-weight: bold;">67%</span> <span style="color: #e0af68;">▓▓▓▓</span><span style="color: #3b4261;">▓▓</span>
+            </div>
+          </div>
+          <!-- Tabs -->
+          <div style="padding: 2px 8px; background: #24283b; border-bottom: 1px solid #3b4261;">
+            <span style="color: #7aa2f7; border-bottom: 2px solid #7aa2f7; padding: 1px 6px;">Pulse</span>
+            <span style="color: #565f89; padding: 1px 6px;">Workers</span>
+            <span style="color: #565f89; padding: 1px 6px;">Models</span>
+            <span style="color: #565f89; padding: 1px 6px;">Traffic</span>
+            <span style="color: #565f89; padding: 1px 6px;">Mesh</span>
+          </div>
+          <!-- Content: 2 columns -->
+          <div style="display: flex; padding: 6px; gap: 6px; min-height: 200px;">
+            <!-- Left: Status -->
+            <div style="flex: 1; display: flex; flex-direction: column; gap: 6px;">
+              <div style="border: 1px solid #3b4261; border-radius: 4px; padding: 6px;">
+                <div style="color: #7aa2f7; font-size: 9px; margin-bottom: 4px;">WORKER HEALTH</div>
+                <div style="display: flex; gap: 12px; margin-bottom: 6px;">
+                  <div><span style="color: #9ece6a; font-size: 16px; font-weight: bold;">10</span> <span style="color: #565f89;">healthy</span></div>
+                  <div><span style="color: #f7768e; font-size: 16px; font-weight: bold;">2</span> <span style="color: #565f89;">unhealthy</span></div>
+                </div>
+                <div style="color: #565f89; font-size: 9px; margin-bottom: 2px;">BY TYPE</div>
+                <div>regular: <span style="color: #c0caf5;">8</span>  prefill: <span style="color: #c0caf5;">2</span>  decode: <span style="color: #c0caf5;">2</span></div>
+              </div>
+              <div style="border: 1px solid #3b4261; border-radius: 4px; padding: 6px;">
+                <div style="color: #7aa2f7; font-size: 9px; margin-bottom: 4px;">CLUSTER</div>
+                <div>node: <span style="color: #c0caf5;">smg-prod-01</span></div>
+                <div>size: <span style="color: #c0caf5;">3</span></div>
+                <div>stores: <span style="color: #9ece6a;">● raft</span> <span style="color: #9ece6a;">● kv</span></div>
+              </div>
+              <div style="border: 1px solid #3b4261; border-radius: 4px; padding: 6px;">
+                <div style="color: #7aa2f7; font-size: 9px; margin-bottom: 4px;">RATE LIMITS</div>
+                <div>limit: <span style="color: #c0caf5;">1000</span>  current: <span style="color: #e0af68;">672</span></div>
+                <div style="margin-top: 3px;"><span style="color: #e0af68;">▓▓▓▓▓▓▓▓▓▓▓▓</span><span style="color: #3b4261;">▓▓▓▓▓</span> 67%</div>
+              </div>
+            </div>
+            <!-- Right: Metrics -->
+            <div style="flex: 1; display: flex; flex-direction: column; gap: 6px;">
+              <div style="border: 1px solid #3b4261; border-radius: 4px; padding: 6px;">
+                <div style="color: #7aa2f7; font-size: 9px; margin-bottom: 4px;">THROUGHPUT (last 60s)</div>
+                <div style="color: #565f89; height: 50px; display: flex; align-items: flex-end; gap: 1px;">
+                  <span style="color: #9ece6a;">▁▂▃▃▄▅▅▆▆▇▇█▇▇▆▆▅▅▄▅▅▆▆▇▇█▇▆▆▅</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; color: #565f89; font-size: 9px; margin-top: 2px;">
+                  <span>-60s</span><span>now</span>
+                </div>
+              </div>
+              <div style="border: 1px solid #3b4261; border-radius: 4px; padding: 6px;">
+                <div style="color: #7aa2f7; font-size: 9px; margin-bottom: 4px;">TOKEN USAGE BY WORKER</div>
+                <div>worker-01  <span style="color: #9ece6a;">▓▓▓▓▓▓▓</span><span style="color: #3b4261;">▓▓▓▓▓▓▓▓▓</span> 45%</div>
+                <div>worker-02  <span style="color: #e0af68;">▓▓▓▓▓▓▓▓▓▓▓▓</span><span style="color: #3b4261;">▓▓▓▓</span> 78%</div>
+                <div>worker-03  <span style="color: #f7768e;">▓▓▓▓▓▓▓▓▓▓▓▓▓▓</span><span style="color: #3b4261;">▓▓</span> 92%</div>
+                <div>worker-04  <span style="color: #9ece6a;">▓▓▓▓</span><span style="color: #3b4261;">▓▓▓▓▓▓▓▓▓▓▓▓</span> 23%</div>
+              </div>
+              <div style="border: 1px solid #3b4261; border-radius: 4px; padding: 6px;">
+                <div style="color: #7aa2f7; font-size: 9px; margin-bottom: 4px;">CACHE HIT RATE (last 60s)</div>
+                <div style="color: #565f89; display: flex; align-items: flex-end; gap: 1px;">
+                  <span style="color: #bb9af7;">▅▅▆▆▇▇█████████████████████████</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; color: #565f89; font-size: 9px; margin-top: 2px;">
+                  <span>-60s</span><span>94.2% now</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <!-- Footer -->
+          <div style="background: #24283b; padding: 3px 8px; border-top: 1px solid #3b4261; color: #565f89; font-size: 9px;">
+            <span style="color: #7aa2f7;">q</span> quit  <span style="color: #7aa2f7;">1-5</span> tabs  <span style="color: #7aa2f7;">/</span> filter  <span style="color: #7aa2f7;">?</span> help  <span style="color: #565f89; float: right;">updated 2s ago</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>3-Row Stack</h3>
+      <p>Top row: health summary cards. Middle: sparkline charts. Bottom: worker load bars. Full width, reads top-to-bottom.</p>
+      <div class="mockup" style="margin-top: 12px;">
+        <div class="mockup-body" style="font-family: monospace; font-size: 10px; line-height: 1.4; background: #1a1b26; color: #a9b1d6; padding: 0;">
+          <!-- Stats bar -->
+          <div style="display: flex; background: #1e2030; border-bottom: 1px solid #3b4261;">
+            <div style="flex: 1; padding: 4px 8px; text-align: center; border-right: 1px solid #3b4261;">
+              <span style="color: #565f89;">WORKERS </span><span style="color: #c0caf5; font-weight: bold;">12</span>
+            </div>
+            <div style="flex: 1; padding: 4px 8px; text-align: center; border-right: 1px solid #3b4261;">
+              <span style="color: #565f89;">MODELS </span><span style="color: #c0caf5; font-weight: bold;">4</span>
+            </div>
+            <div style="flex: 1; padding: 4px 8px; text-align: center; border-right: 1px solid #3b4261;">
+              <span style="color: #565f89;">THROUGHPUT </span><span style="color: #c0caf5; font-weight: bold;">1.2k</span>
+            </div>
+            <div style="flex: 1; padding: 4px 8px; text-align: center;">
+              <span style="color: #565f89;">LOAD </span><span style="color: #e0af68; font-weight: bold;">67%</span>
+            </div>
+          </div>
+          <div style="padding: 2px 8px; background: #24283b; border-bottom: 1px solid #3b4261;">
+            <span style="color: #7aa2f7; border-bottom: 2px solid #7aa2f7; padding: 1px 6px;">Pulse</span>
+            <span style="color: #565f89; padding: 1px 6px;">Workers</span>
+            <span style="color: #565f89; padding: 1px 6px;">Models</span>
+          </div>
+          <!-- Row 1: Health cards -->
+          <div style="display: flex; gap: 6px; padding: 6px;">
+            <div style="flex: 1; border: 1px solid #3b4261; border-radius: 4px; padding: 6px; text-align: center;">
+              <div style="color: #9ece6a; font-size: 20px; font-weight: bold;">10</div>
+              <div style="color: #565f89; font-size: 9px;">HEALTHY</div>
+            </div>
+            <div style="flex: 1; border: 1px solid #3b4261; border-radius: 4px; padding: 6px; text-align: center;">
+              <div style="color: #f7768e; font-size: 20px; font-weight: bold;">2</div>
+              <div style="color: #565f89; font-size: 9px;">UNHEALTHY</div>
+            </div>
+            <div style="flex: 1; border: 1px solid #3b4261; border-radius: 4px; padding: 6px; text-align: center;">
+              <div style="color: #c0caf5; font-size: 20px; font-weight: bold;">3</div>
+              <div style="color: #565f89; font-size: 9px;">NODES</div>
+            </div>
+            <div style="flex: 1; border: 1px solid #3b4261; border-radius: 4px; padding: 6px; text-align: center;">
+              <div style="color: #e0af68; font-size: 20px; font-weight: bold;">672</div>
+              <div style="color: #565f89; font-size: 9px;">REQ/MIN</div>
+            </div>
+          </div>
+          <!-- Row 2: Charts -->
+          <div style="display: flex; gap: 6px; padding: 0 6px;">
+            <div style="flex: 1; border: 1px solid #3b4261; border-radius: 4px; padding: 6px;">
+              <div style="color: #7aa2f7; font-size: 9px;">THROUGHPUT</div>
+              <div style="color: #9ece6a;">▁▂▃▃▄▅▅▆▆▇▇█▇▇▆▅▅▆▇█▇▆▅▅▆▇█▇▆</div>
+            </div>
+            <div style="flex: 1; border: 1px solid #3b4261; border-radius: 4px; padding: 6px;">
+              <div style="color: #7aa2f7; font-size: 9px;">CACHE HIT RATE</div>
+              <div style="color: #bb9af7;">▅▅▆▆▇▇████████████████████████</div>
+            </div>
+          </div>
+          <!-- Row 3: Load bars -->
+          <div style="padding: 6px;">
+            <div style="border: 1px solid #3b4261; border-radius: 4px; padding: 6px;">
+              <div style="color: #7aa2f7; font-size: 9px; margin-bottom: 3px;">WORKER LOADS</div>
+              <div>worker-01  <span style="color: #9ece6a;">▓▓▓▓▓▓▓</span><span style="color: #3b4261;">▓▓▓▓▓▓▓▓▓</span> 45%</div>
+              <div>worker-02  <span style="color: #e0af68;">▓▓▓▓▓▓▓▓▓▓▓▓</span><span style="color: #3b4261;">▓▓▓▓</span> 78%</div>
+              <div>worker-03  <span style="color: #f7768e;">▓▓▓▓▓▓▓▓▓▓▓▓▓▓</span><span style="color: #3b4261;">▓▓</span> 92%</div>
+            </div>
+          </div>
+          <div style="background: #24283b; padding: 3px 8px; border-top: 1px solid #3b4261; color: #565f89; font-size: 9px;">
+            <span style="color: #7aa2f7;">q</span> quit  <span style="color: #7aa2f7;">1-5</span> tabs  <span style="color: #7aa2f7;">?</span> help
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

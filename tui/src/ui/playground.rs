@@ -22,8 +22,13 @@ pub fn render_playground(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_messages(f: &mut Frame, app: &App, area: Rect) {
+    let title = format!(
+        " Chat — {} — /v1/{} ",
+        app.chat_model,
+        app.chat_endpoint.label(),
+    );
     let block = Block::default()
-        .title(format!(" Chat — {} ", app.playground_model))
+        .title(title)
         .title_style(theme::title())
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
@@ -32,7 +37,7 @@ fn render_messages(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    if app.playground_messages.is_empty() {
+    if app.chat_messages.is_empty() {
         let help = vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -40,7 +45,7 @@ fn render_messages(f: &mut Frame, app: &App, area: Rect) {
                 theme::label(),
             )),
             Line::from(Span::styled(
-                "Tab to cycle models. Esc to cancel streaming.",
+                "Tab: cycle models  Shift+Tab: cycle endpoint  Esc: cancel",
                 theme::label(),
             )),
         ];
@@ -51,7 +56,7 @@ fn render_messages(f: &mut Frame, app: &App, area: Rect) {
     // Build all lines from messages
     let mut lines: Vec<Line> = Vec::new();
 
-    for msg in &app.playground_messages {
+    for msg in &app.chat_messages {
         let (prefix, prefix_style) = match msg.role.as_str() {
             "user" => (
                 "You: ",
@@ -60,7 +65,7 @@ fn render_messages(f: &mut Frame, app: &App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ),
             "assistant" => (
-                "AI: ",
+                "SMG: ",
                 Style::default()
                     .fg(theme::GREEN)
                     .add_modifier(Modifier::BOLD),
@@ -92,8 +97,8 @@ fn render_messages(f: &mut Frame, app: &App, area: Rect) {
         }
 
         // Show streaming cursor
-        if msg.role == "assistant" && app.playground_streaming
-            && std::ptr::eq(msg, app.playground_messages.last().unwrap())
+        if msg.role == "assistant" && app.chat_streaming
+            && std::ptr::eq(msg, app.chat_messages.last().unwrap())
         {
             if let Some(last_line) = lines.last_mut() {
                 last_line.spans.push(Span::styled("▊", Style::default().fg(theme::ACCENT)));
@@ -107,10 +112,10 @@ fn render_messages(f: &mut Frame, app: &App, area: Rect) {
     let total_lines = lines.len() as u16;
     let visible = inner.height;
     let max_scroll = total_lines.saturating_sub(visible);
-    let scroll = if app.playground_scroll >= max_scroll {
+    let scroll = if app.chat_scroll >= max_scroll {
         max_scroll
     } else {
-        app.playground_scroll
+        app.chat_scroll
     };
 
     f.render_widget(
@@ -122,31 +127,31 @@ fn render_messages(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_input(f: &mut Frame, app: &App, area: Rect) {
-    let title = if app.playground_streaming {
+    let title = if app.chat_streaming {
         " Streaming... (Esc to stop) "
     } else {
-        " Message (Enter to send, Tab to change model) "
+        " Message (Enter to send, Tab: model, Shift+Tab: endpoint) "
     };
 
     let block = Block::default()
         .title(title)
-        .title_style(if app.playground_streaming {
+        .title_style(if app.chat_streaming {
             Style::default().fg(theme::YELLOW)
         } else {
             theme::title()
         })
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(if app.playground_streaming {
+        .border_style(Style::default().fg(if app.chat_streaming {
             theme::YELLOW
         } else {
             theme::BORDER
         }))
         .style(Style::default().bg(theme::BG));
 
-    let input_text = if app.playground_streaming {
+    let input_text = if app.chat_streaming {
         String::new()
     } else {
-        format!("{}▊", app.playground_input)
+        format!("{}▊", app.chat_input)
     };
 
     let paragraph = Paragraph::new(input_text)

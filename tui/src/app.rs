@@ -269,6 +269,90 @@ impl App {
                     self.set_status("Usage: delete <id>".into());
                 }
             }
+            Some("priority") => {
+                let args = parts.get(1).copied();
+                if let Some(val) = args.and_then(|a| a.parse::<u32>().ok()) {
+                    if let Some(id) = self.selected_worker_id() {
+                        let update = openai_protocol::worker::WorkerUpdateRequest {
+                            priority: Some(val),
+                            cost: None, labels: None, api_key: None, health: None,
+                        };
+                        match self.client.update_worker(&id, &update).await {
+                            Ok(_) => self.set_status(format!("Priority set to {val}")),
+                            Err(e) => self.set_status(format!("Error: {e}")),
+                        }
+                    } else {
+                        self.set_status("No worker selected".to_string());
+                    }
+                } else {
+                    self.set_status("Usage: :priority <number>".to_string());
+                }
+            }
+            Some("cost") => {
+                let args = parts.get(1).copied();
+                if let Some(val) = args.and_then(|a| a.parse::<f32>().ok()) {
+                    if let Some(id) = self.selected_worker_id() {
+                        let update = openai_protocol::worker::WorkerUpdateRequest {
+                            cost: Some(val),
+                            priority: None, labels: None, api_key: None, health: None,
+                        };
+                        match self.client.update_worker(&id, &update).await {
+                            Ok(_) => self.set_status(format!("Cost set to {val}")),
+                            Err(e) => self.set_status(format!("Error: {e}")),
+                        }
+                    } else {
+                        self.set_status("No worker selected".to_string());
+                    }
+                } else {
+                    self.set_status("Usage: :cost <number>".to_string());
+                }
+            }
+            Some("flush-cache") => {
+                if let Some(id) = self.selected_worker_id() {
+                    let url = self.selected_worker_url().unwrap_or_default();
+                    self.confirm_flush = Some((id, url));
+                } else {
+                    self.set_status("No worker selected".to_string());
+                }
+            }
+            Some("toggle-health") => {
+                if let Some(id) = self.selected_worker_id() {
+                    let update = openai_protocol::worker::WorkerUpdateRequest {
+                        health: Some(openai_protocol::worker::HealthCheckUpdate {
+                            disable_health_check: Some(true),
+                            timeout_secs: None, check_interval_secs: None,
+                            success_threshold: None, failure_threshold: None,
+                        }),
+                        priority: None, cost: None, labels: None, api_key: None,
+                    };
+                    match self.client.update_worker(&id, &update).await {
+                        Ok(_) => self.set_status("Health check toggled".to_string()),
+                        Err(e) => self.set_status(format!("Error: {e}")),
+                    }
+                } else {
+                    self.set_status("No worker selected".to_string());
+                }
+            }
+            Some("add-openai") => {
+                self.add_menu_state = Some(AddMenuState::EnterApiKey {
+                    provider: ProviderPreset::OpenAI, input: String::new(),
+                });
+            }
+            Some("add-anthropic") => {
+                self.add_menu_state = Some(AddMenuState::EnterApiKey {
+                    provider: ProviderPreset::Anthropic, input: String::new(),
+                });
+            }
+            Some("add-xai") => {
+                self.add_menu_state = Some(AddMenuState::EnterApiKey {
+                    provider: ProviderPreset::Xai, input: String::new(),
+                });
+            }
+            Some("add-gemini") => {
+                self.add_menu_state = Some(AddMenuState::EnterApiKey {
+                    provider: ProviderPreset::Gemini, input: String::new(),
+                });
+            }
             _ => self.set_status(format!("Unknown command: {cmd}")),
         }
     }

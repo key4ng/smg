@@ -24,6 +24,7 @@ pub struct App {
     pub show_help: bool,
     /// (worker_id, worker_url) pending confirmation
     pub confirm_delete: Option<(String, String)>,
+    pub show_detail: bool,
 
     status_clear_at: Option<std::time::Instant>,
 }
@@ -42,6 +43,7 @@ impl App {
             status_message: None,
             show_help: false,
             confirm_delete: None,
+            show_detail: false,
             status_clear_at: None,
         }
     }
@@ -138,9 +140,17 @@ impl App {
             // Help
             KeyCode::Char('?') => self.show_help = !self.show_help,
 
+            KeyCode::Enter => {
+                if self.view == View::Workers {
+                    self.show_detail = !self.show_detail;
+                }
+            }
+
             // Esc clears overlays/filters
             KeyCode::Esc => {
-                if self.show_help {
+                if self.show_detail {
+                    self.show_detail = false;
+                } else if self.show_help {
                     self.show_help = false;
                 } else {
                     self.active_filter = None;

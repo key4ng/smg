@@ -1,15 +1,27 @@
 use ratatui::{
-    layout::Rect,
+    layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     widgets::{Cell, Row, Table, TableState},
     Frame,
 };
 
-use super::theme;
+use super::{detail, theme};
 use crate::{app::App, client::WorkerInfo};
 
 pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
     let block = theme::panel(" Workers ");
+
+    // Split layout when detail panel is visible
+    let (table_area, detail_area) = if app.show_detail {
+        let split = Layout::vertical([
+            Constraint::Percentage(60),
+            Constraint::Percentage(40),
+        ])
+        .split(area);
+        (split[0], Some(split[1]))
+    } else {
+        (area, None)
+    };
 
     let state = app.state.read().unwrap();
 
@@ -27,11 +39,19 @@ pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
     });
     let header = Row::new(header_cells).height(1);
 
-    let rows: Vec<Row> = if let Some(ref wl) = state.workers {
+    let filtered: Vec<WorkerInfo> = if let Some(ref wl) = state.workers {
         wl.workers
             .iter()
             .filter(|w| matches_filter(w, &app.active_filter))
-            .map(|w| {
+            .cloned()
+            .collect()
+    } else {
+        vec![]
+    };
+
+    let rows: Vec<Row> = filtered
+        .iter()
+        .map(|w| {
                 let health_style = if w.is_healthy {
                     Style::default().fg(theme::GREEN)
                 } else {
@@ -67,10 +87,7 @@ pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
                 ])
                 .style(Style::default().bg(theme::BG))
             })
-            .collect()
-    } else {
-        vec![]
-    };
+            .collect();
 
     let row_count = rows.len();
 
@@ -101,7 +118,16 @@ pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
         table_state.select(Some(app.selected_index.min(row_count.saturating_sub(1))));
     }
 
-    f.render_stateful_widget(table, area, &mut table_state);
+    f.render_stateful_widget(table, table_area, &mut table_state);
+
+    // Drop state before calling detail render (which re-acquires it)
+    drop(state);
+
+    if let Some(detail_area) = detail_area {
+        if let Some(worker) = filtered.get(app.selected_index) {
+            detail::render_detail(f, app, worker, detail_area);
+        }
+    }
 }
 
 fn matches_filter(worker: &WorkerInfo, filter: &Option<String>) -> bool {

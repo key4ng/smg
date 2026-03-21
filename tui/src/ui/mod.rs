@@ -1,4 +1,5 @@
 mod dialog;
+pub mod detail;
 mod filter;
 mod footer;
 mod help;

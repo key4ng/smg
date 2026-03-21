@@ -79,21 +79,48 @@ fn render_messages(f: &mut Frame, app: &App, area: Rect) {
         };
 
         // First line gets the role prefix
+        let is_assistant = msg.role == "assistant";
         let content_lines: Vec<&str> = msg.content.split('\n').collect();
+        let mut in_code_block = false;
+
         for (i, content_line) in content_lines.iter().enumerate() {
-            if i == 0 {
-                lines.push(Line::from(vec![
-                    Span::styled(prefix, prefix_style),
-                    Span::styled(*content_line, theme::text()),
-                ]));
-            } else {
-                // Indent continuation lines
-                let indent = " ".repeat(prefix.len());
-                lines.push(Line::from(vec![
-                    Span::raw(indent),
-                    Span::styled(*content_line, theme::text()),
-                ]));
+            // Track fenced code blocks
+            if content_line.starts_with("```") {
+                in_code_block = !in_code_block;
+                let mut spans = Vec::new();
+                if i == 0 {
+                    spans.push(Span::styled(prefix, prefix_style));
+                } else {
+                    spans.push(Span::raw(" ".repeat(prefix.len())));
+                }
+                spans.push(Span::styled(
+                    *content_line,
+                    Style::default().fg(theme::YELLOW),
+                ));
+                lines.push(Line::from(spans));
+                continue;
             }
+
+            let mut spans = Vec::new();
+            if i == 0 {
+                spans.push(Span::styled(prefix, prefix_style));
+            } else {
+                spans.push(Span::raw(" ".repeat(prefix.len())));
+            }
+
+            if in_code_block {
+                // Inside code block — render as-is with code style
+                spans.push(Span::styled(
+                    *content_line,
+                    Style::default().fg(theme::YELLOW),
+                ));
+            } else if is_assistant {
+                spans.extend(parse_markdown_spans(content_line));
+            } else {
+                spans.push(Span::styled(*content_line, theme::text()));
+            }
+
+            lines.push(Line::from(spans));
         }
 
         // Show streaming cursor
@@ -158,4 +185,137 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
         .style(theme::text())
         .block(block);
     f.render_widget(paragraph, area);
+}
+
+/// Parse inline markdown into styled spans.
+/// Supports: **bold**, *italic*, `code`, ### headings
+fn parse_markdown_spans(line: &str) -> Vec<Span<'_>> {
+    // Handle heading lines
+    if let Some(rest) = line.strip_prefix("### ") {
+        return vec![Span::styled(
+            rest,
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        )];
+    }
+    if let Some(rest) = line.strip_prefix("## ") {
+        return vec![Span::styled(
+            rest,
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        )];
+    }
+    if let Some(rest) = line.strip_prefix("# ") {
+        return vec![Span::styled(
+            rest,
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        )];
+    }
+    // Handle bullet points
+    let (bullet_prefix, rest) = if let Some(rest) = line.strip_prefix("- ") {
+        ("• ", rest)
+    } else if let Some(rest) = line.strip_prefix("* ") {
+        ("• ", rest)
+    } else {
+        ("", line)
+    };
+
+    let mut spans = Vec::new();
+    if !bullet_prefix.is_empty() {
+        spans.push(Span::styled(bullet_prefix, theme::text()));
+    }
+
+    let chars: Vec<char> = rest.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    let mut buf = String::new();
+
+    while i < len {
+        // **bold**
+        if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
+            if !buf.is_empty() {
+                spans.push(Span::styled(buf.clone(), theme::text()));
+                buf.clear();
+            }
+            i += 2;
+            let start = i;
+            while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '*') {
+                i += 1;
+            }
+            let bold_text: String = chars[start..i].iter().collect();
+            spans.push(Span::styled(
+                bold_text,
+                Style::default()
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            if i + 1 < len {
+                i += 2; // skip closing **
+            }
+            continue;
+        }
+
+        // `code`
+        if chars[i] == '`' {
+            if !buf.is_empty() {
+                spans.push(Span::styled(buf.clone(), theme::text()));
+                buf.clear();
+            }
+            i += 1;
+            let start = i;
+            while i < len && chars[i] != '`' {
+                i += 1;
+            }
+            let code_text: String = chars[start..i].iter().collect();
+            spans.push(Span::styled(
+                code_text,
+                Style::default().fg(theme::YELLOW),
+            ));
+            if i < len {
+                i += 1; // skip closing `
+            }
+            continue;
+        }
+
+        // *italic* (single asterisk, not double)
+        if chars[i] == '*' && (i + 1 >= len || chars[i + 1] != '*') {
+            if !buf.is_empty() {
+                spans.push(Span::styled(buf.clone(), theme::text()));
+                buf.clear();
+            }
+            i += 1;
+            let start = i;
+            while i < len && chars[i] != '*' {
+                i += 1;
+            }
+            let italic_text: String = chars[start..i].iter().collect();
+            spans.push(Span::styled(
+                italic_text,
+                Style::default()
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::ITALIC),
+            ));
+            if i < len {
+                i += 1; // skip closing *
+            }
+            continue;
+        }
+
+        buf.push(chars[i]);
+        i += 1;
+    }
+
+    if !buf.is_empty() {
+        spans.push(Span::styled(buf, theme::text()));
+    }
+
+    if spans.is_empty() {
+        spans.push(Span::styled("", theme::text()));
+    }
+
+    spans
 }

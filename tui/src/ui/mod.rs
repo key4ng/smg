@@ -1,11 +1,12 @@
 mod dialog;
 mod filter;
 mod footer;
-mod header;
 mod help;
 mod pulse;
 mod workers;
 pub mod sparkline;
+pub mod stats_bar;
+pub mod tabs;
 pub mod theme;
 
 use ratatui::{
@@ -17,14 +18,29 @@ use crate::{app::App, types::View};
 
 /// Root render function — called once per frame.
 pub fn render(f: &mut Frame, app: &App) {
-    let [header_area, content_area, footer_area] = Layout::vertical([
-        Constraint::Length(7),
+    let state = app.state.read().unwrap();
+
+    // Layout: stats_bar (1) + tabs (1) + content (fill) + footer (2)
+    let [stats_area, tabs_area, content_area, footer_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Fill(1),
         Constraint::Length(2),
     ])
     .areas(f.area());
 
-    header::render_header(f, app, header_area);
+    // Background
+    f.render_widget(
+        ratatui::widgets::Block::default().style(
+            ratatui::style::Style::default().bg(theme::BG),
+        ),
+        f.area(),
+    );
+
+    stats_bar::render_stats_bar(f, &state, stats_area);
+    tabs::render_tabs(f, app.view, tabs_area);
+
+    drop(state);
 
     match app.view {
         View::Pulse => pulse::render_pulse(f, app, content_area),
@@ -36,7 +52,7 @@ pub fn render(f: &mut Frame, app: &App) {
 
     footer::render_footer(f, app, footer_area);
 
-    // Overlays (rendered last so they draw on top)
+    // Overlays (rendered last)
     if app.show_help {
         help::render_help(f);
     }
@@ -47,16 +63,17 @@ pub fn render(f: &mut Frame, app: &App) {
 }
 
 fn render_placeholder(f: &mut Frame, view: View, area: ratatui::layout::Rect) {
-    use ratatui::{
-        style::{Color, Style},
-        widgets::{Block, Borders, Paragraph},
-    };
+    use ratatui::widgets::{Block, Borders, Paragraph};
 
     let text = format!("{} — coming soon", view.label());
     let block = Block::default()
         .borders(Borders::ALL)
         .title(view.label())
-        .style(Style::default().fg(Color::DarkGray));
-    let paragraph = Paragraph::new(text).block(block);
+        .title_style(theme::title())
+        .border_style(ratatui::style::Style::default().fg(theme::BORDER))
+        .style(ratatui::style::Style::default().bg(theme::BG));
+    let paragraph = Paragraph::new(text)
+        .style(theme::label())
+        .block(block);
     f.render_widget(paragraph, area);
 }

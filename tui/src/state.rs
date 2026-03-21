@@ -32,6 +32,11 @@ pub struct GatewayState {
     pub per_worker_throughput: HashMap<String, VecDeque<f64>>,
     /// Per-worker cache hit rate history.
     pub per_worker_cache_hit: HashMap<String, VecDeque<f64>>,
+
+    /// Previous total request count from Prometheus (for computing req/s).
+    pub prev_request_count: Option<u64>,
+    /// Rolling requests-per-second history (for external workers without gen_throughput).
+    pub requests_per_sec_history: VecDeque<f64>,
 }
 
 /// Thread-safe shared handle to the gateway state.
@@ -44,14 +49,26 @@ pub fn spawn_poller(client: SmgClient, state: SharedState, interval_secs: u64) {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         loop {
             ticker.tick().await;
-            poll_once(&client, &state).await;
+            poll_once(&client, &state, interval_secs).await;
         }
     });
 }
 
-async fn poll_once(client: &SmgClient, state: &SharedState) {
+/// Parse total request count from Prometheus metrics text.
+fn parse_request_count(metrics_text: &str) -> u64 {
+    metrics_text
+        .lines()
+        .filter(|line| line.starts_with("smg_router_requests_total{"))
+        .filter_map(|line| {
+            line.rsplit_once(' ')
+                .and_then(|(_, v)| v.parse::<u64>().ok())
+        })
+        .sum()
+}
+
+async fn poll_once(client: &SmgClient, state: &SharedState, interval_secs: u64) {
     // Fire all requests concurrently.
-    let (health, workers, loads, cluster, mesh, rates, models) = tokio::join!(
+    let (health, workers, loads, cluster, mesh, rates, models, metrics) = tokio::join!(
         client.check_health(),
         client.list_workers(),
         client.get_loads(),
@@ -59,6 +76,7 @@ async fn poll_once(client: &SmgClient, state: &SharedState) {
         client.get_mesh_health(),
         client.get_rate_limit_stats(),
         client.list_models(),
+        client.fetch_metrics(),
     );
 
     let mut s = state.write().unwrap();
@@ -123,7 +141,8 @@ async fn poll_once(client: &SmgClient, state: &SharedState) {
         Vec::new()
     };
 
-    if !worker_metrics.is_empty() {
+    let has_worker_metrics = !worker_metrics.is_empty();
+    if has_worker_metrics {
         let mut total_throughput = 0.0_f64;
         let mut total_cache_hits = 0.0_f64;
         let worker_count = worker_metrics.len() as u32;
@@ -151,5 +170,27 @@ async fn poll_once(client: &SmgClient, state: &SharedState) {
         let avg_cache = if worker_count > 0 { total_cache_hits / worker_count as f64 } else { 0.0 };
         if s.cache_hit_history.len() >= SPARKLINE_CAP { s.cache_hit_history.pop_front(); }
         s.cache_hit_history.push_back(avg_cache);
+    }
+
+    // Compute requests/sec from Prometheus counter (works for external workers).
+    if let Ok(metrics_text) = metrics {
+        let current_count = parse_request_count(&metrics_text);
+        if let Some(prev) = s.prev_request_count {
+            let delta = current_count.saturating_sub(prev);
+            let rps = delta as f64 / interval_secs as f64;
+            if s.requests_per_sec_history.len() >= SPARKLINE_CAP {
+                s.requests_per_sec_history.pop_front();
+            }
+            s.requests_per_sec_history.push_back(rps);
+
+            // If no gen_throughput data, use req/s as throughput fallback.
+            if !has_worker_metrics {
+                if s.throughput_history.len() >= SPARKLINE_CAP {
+                    s.throughput_history.pop_front();
+                }
+                s.throughput_history.push_back(rps);
+            }
+        }
+        s.prev_request_count = Some(current_count);
     }
 }

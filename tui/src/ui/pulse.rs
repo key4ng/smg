@@ -198,7 +198,12 @@ fn render_rate_limits(f: &mut Frame, state: &crate::state::GatewayState, area: R
 }
 
 fn render_throughput(f: &mut Frame, state: &crate::state::GatewayState, area: Rect) {
-    let block = theme::panel(" THROUGHPUT ");
+    // Determine if we have gen_throughput data or should use req/s fallback
+    let use_rps = !state.requests_per_sec_history.is_empty()
+        && !state.throughput_history.iter().any(|&v| v > 0.0 && state.requests_per_sec_history.is_empty());
+
+    let title = if use_rps { " THROUGHPUT (req/s) " } else { " THROUGHPUT " };
+    let block = theme::panel(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -212,6 +217,7 @@ fn render_throughput(f: &mut Frame, state: &crate::state::GatewayState, area: Re
 
     // Header: latest value
     let latest = state.throughput_history.back().copied().unwrap_or(0.0);
+    let unit = if use_rps { "req/s" } else { "tok/s" };
     let header_area = Rect {
         x: inner.x,
         y: inner.y,
@@ -221,7 +227,7 @@ fn render_throughput(f: &mut Frame, state: &crate::state::GatewayState, area: Re
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("Latest: ", theme::label()),
-            Span::styled(format!("{:.1} tok/s", latest), theme::text().fg(theme::GREEN)),
+            Span::styled(format!("{:.1} {}", latest, unit), theme::text().fg(theme::GREEN)),
         ])),
         header_area,
     );

@@ -144,14 +144,25 @@ pub fn render_stats_bar(f: &mut Frame, state: &GatewayState, area: Rect) {
     };
     f.render_widget(Paragraph::new(models_line).style(bg), chunks[2]);
 
-    // Cell 3: Throughput
-    let throughput = state.throughput_history.back().copied().unwrap_or(0.0);
+    // Cell 3: Throughput (tok/s from local workers, or req/s from Prometheus)
     let tp_line = if state.connected {
-        Line::from(vec![
-            Span::styled("THROUGHPUT ", theme::label()),
-            Span::styled(format!("{throughput:.0}"), theme::text()),
-            Span::styled(" tok/s", theme::label()),
-        ])
+        let has_gen_throughput = state.throughput_history.iter().any(|&v| v > 0.0)
+            && state.requests_per_sec_history.is_empty();
+        if has_gen_throughput {
+            let throughput = state.throughput_history.back().copied().unwrap_or(0.0);
+            Line::from(vec![
+                Span::styled("THROUGHPUT ", theme::label()),
+                Span::styled(format!("{throughput:.0}"), theme::text()),
+                Span::styled(" tok/s", theme::label()),
+            ])
+        } else {
+            let rps = state.requests_per_sec_history.back().copied().unwrap_or(0.0);
+            Line::from(vec![
+                Span::styled("THROUGHPUT ", theme::label()),
+                Span::styled(format!("{rps:.1}"), theme::text()),
+                Span::styled(" req/s", theme::label()),
+            ])
+        }
     } else {
         Line::from(vec![
             Span::styled("THROUGHPUT ", theme::label()),

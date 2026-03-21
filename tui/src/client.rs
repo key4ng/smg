@@ -235,6 +235,19 @@ impl SmgClient {
         Ok(resp)
     }
 
+    /// Fetch raw Prometheus metrics text from the metrics endpoint.
+    pub async fn fetch_metrics(&self) -> Result<String> {
+        let url = format!("{}/metrics", self.metrics_url);
+        Ok(self
+            .http
+            .get(&url)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?)
+    }
+
     pub async fn flush_worker_cache(&self, id: &str) -> Result<serde_json::Value> {
         let resp = self
             .request(reqwest::Method::POST, &format!("/workers/{id}/flush_cache"))

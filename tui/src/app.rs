@@ -6,7 +6,7 @@ use crate::{
     client::SmgClient,
     event::{AppEvent, EventHandler},
     state::SharedState,
-    types::{InputMode, View},
+    types::{AddMenuState, ActionMenuItem, InputMode, ProviderPreset, View},
     ui,
 };
 
@@ -25,6 +25,10 @@ pub struct App {
     /// (worker_id, worker_url) pending confirmation
     pub confirm_delete: Option<(String, String)>,
     pub show_detail: bool,
+    pub show_action_menu: bool,
+    pub action_menu_index: usize,
+    pub add_menu_state: Option<AddMenuState>,
+    pub confirm_flush: Option<(String, String)>,
 
     status_clear_at: Option<std::time::Instant>,
 }
@@ -44,6 +48,10 @@ impl App {
             show_help: false,
             confirm_delete: None,
             show_detail: false,
+            show_action_menu: false,
+            action_menu_index: 0,
+            add_menu_state: None,
+            confirm_flush: None,
             status_clear_at: None,
         }
     }
@@ -92,6 +100,29 @@ impl App {
         // Delete confirmation dialog takes priority
         if self.confirm_delete.is_some() {
             self.handle_delete_confirm(key).await;
+            return;
+        }
+
+        if self.show_action_menu {
+            self.handle_action_menu_key(key).await;
+            return;
+        }
+        if self.add_menu_state.is_some() {
+            self.handle_add_menu_key(key).await;
+            return;
+        }
+        if let Some((ref id, ref _url)) = self.confirm_flush.clone() {
+            match key.code {
+                KeyCode::Char('y') => {
+                    let id = id.clone();
+                    self.confirm_flush = None;
+                    match self.client.flush_worker_cache(&id).await {
+                        Ok(_) => self.set_status("Cache flushed".to_string()),
+                        Err(e) => self.set_status(format!("Error: {e}")),
+                    }
+                }
+                _ => { self.confirm_flush = None; }
+            }
             return;
         }
 
@@ -161,9 +192,16 @@ impl App {
             KeyCode::Char('d') if self.view == View::Workers => {
                 self.start_delete();
             }
-            KeyCode::Char('a') if self.view == View::Workers => {
-                self.input_mode = InputMode::Command;
-                self.input_buffer = "add ".to_string();
+            KeyCode::Char('e') => {
+                if self.view == View::Workers {
+                    self.show_action_menu = true;
+                    self.action_menu_index = 0;
+                }
+            }
+            KeyCode::Char('a') => {
+                if self.view == View::Workers {
+                    self.add_menu_state = Some(AddMenuState::SelectProvider);
+                }
             }
 
             _ => {}
@@ -320,6 +358,139 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    async fn handle_action_menu_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => { self.show_action_menu = false; }
+            KeyCode::Char('j') | KeyCode::Down => {
+                let max = ActionMenuItem::all().len().saturating_sub(1);
+                self.action_menu_index = (self.action_menu_index + 1).min(max);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.action_menu_index = self.action_menu_index.saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                let item = ActionMenuItem::all()[self.action_menu_index];
+                self.show_action_menu = false;
+                match item {
+                    ActionMenuItem::UpdatePriority => {
+                        self.input_mode = InputMode::Command;
+                        self.input_buffer = "priority ".to_string();
+                    }
+                    ActionMenuItem::UpdateCost => {
+                        self.input_mode = InputMode::Command;
+                        self.input_buffer = "cost ".to_string();
+                    }
+                    ActionMenuItem::UpdateApiKey => {
+                        self.input_mode = InputMode::Command;
+                        self.input_buffer = "api-key ".to_string();
+                    }
+                    ActionMenuItem::FlushCache => {
+                        if let Some(id) = self.selected_worker_id() {
+                            let url = self.selected_worker_url().unwrap_or_default();
+                            self.confirm_flush = Some((id, url));
+                        }
+                    }
+                    ActionMenuItem::ToggleHealthCheck => {
+                        if let Some(id) = self.selected_worker_id() {
+                            match self.client.update_worker(&id, &openai_protocol::worker::WorkerUpdateRequest {
+                                priority: None, cost: None, labels: None, api_key: None,
+                                health: Some(openai_protocol::worker::HealthCheckUpdate {
+                                    disable_health_check: Some(true),
+                                    timeout_secs: None, check_interval_secs: None,
+                                    success_threshold: None, failure_threshold: None,
+                                }),
+                            }).await {
+                                Ok(_) => self.set_status("Health check toggled".to_string()),
+                                Err(e) => self.set_status(format!("Error: {e}")),
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    async fn handle_add_menu_key(&mut self, key: KeyEvent) {
+        match &self.add_menu_state.clone() {
+            Some(AddMenuState::SelectProvider) => match key.code {
+                KeyCode::Esc => { self.add_menu_state = None; }
+                KeyCode::Char('1') => {
+                    self.add_menu_state = Some(AddMenuState::EnterApiKey {
+                        provider: ProviderPreset::OpenAI, input: String::new(),
+                    });
+                }
+                KeyCode::Char('2') => {
+                    self.add_menu_state = Some(AddMenuState::EnterApiKey {
+                        provider: ProviderPreset::Anthropic, input: String::new(),
+                    });
+                }
+                KeyCode::Char('3') => {
+                    self.add_menu_state = Some(AddMenuState::EnterApiKey {
+                        provider: ProviderPreset::Xai, input: String::new(),
+                    });
+                }
+                KeyCode::Char('4') => {
+                    self.add_menu_state = Some(AddMenuState::EnterApiKey {
+                        provider: ProviderPreset::Gemini, input: String::new(),
+                    });
+                }
+                KeyCode::Char('5') | KeyCode::Char('6') => {
+                    self.add_menu_state = None;
+                    self.set_status("Local backend launching coming in Phase 2".to_string());
+                }
+                KeyCode::Char('7') => {
+                    self.add_menu_state = None;
+                    self.input_mode = InputMode::Command;
+                    self.input_buffer = "add ".to_string();
+                }
+                _ => {}
+            },
+            Some(AddMenuState::EnterApiKey { provider, input }) => match key.code {
+                KeyCode::Esc => { self.add_menu_state = None; }
+                KeyCode::Enter => {
+                    let provider = *provider;
+                    let api_key = input.clone();
+                    self.add_menu_state = None;
+                    let mut spec = WorkerSpec::new(provider.url());
+                    spec.provider = Some(provider.provider_type());
+                    spec.runtime_type = provider.runtime_type();
+                    spec.api_key = Some(api_key);
+                    match self.client.add_worker(&spec).await {
+                        Ok(_) => self.set_status(format!("Added {} worker", provider.label())),
+                        Err(e) => self.set_status(format!("Error: {e}")),
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(AddMenuState::EnterApiKey { ref mut input, .. }) = self.add_menu_state {
+                        input.pop();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Some(AddMenuState::EnterApiKey { ref mut input, .. }) = self.add_menu_state {
+                        input.push(c);
+                    }
+                }
+                _ => {}
+            },
+            None => {}
+        }
+    }
+
+    fn selected_worker_id(&self) -> Option<String> {
+        let state = self.state.read().unwrap();
+        state.workers.as_ref()
+            .and_then(|w| w.workers.get(self.selected_index))
+            .map(|w| w.id.clone())
+    }
+
+    fn selected_worker_url(&self) -> Option<String> {
+        let state = self.state.read().unwrap();
+        state.workers.as_ref()
+            .and_then(|w| w.workers.get(self.selected_index))
+            .map(|w| w.url.clone())
     }
 
     fn set_status(&mut self, msg: String) {

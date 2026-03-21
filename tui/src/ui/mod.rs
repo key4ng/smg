@@ -1,3 +1,4 @@
+pub mod action_menu;
 mod dialog;
 pub mod detail;
 mod filter;
@@ -61,6 +62,12 @@ pub fn render(f: &mut Frame, app: &App) {
     }
     if app.confirm_delete.is_some() {
         dialog::render_delete_dialog(f, app);
+    }
+    if app.show_action_menu {
+        action_menu::render_action_menu(f, app);
+    }
+    if app.add_menu_state.is_some() {
+        action_menu::render_add_menu(f, app);
     }
     if app.confirm_flush.is_some() {
         dialog::render_flush_dialog(f, app);

@@ -69,3 +69,93 @@ pub enum InputMode {
     /// Command mode — typing populates the command bar (prefix: `:`).
     Command,
 }
+
+/// State machine for the Add Worker menu flow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AddMenuState {
+    /// Selecting provider type (1-7 menu).
+    SelectProvider,
+    /// Typing API key for external provider.
+    EnterApiKey {
+        provider: ProviderPreset,
+        input: String,
+    },
+}
+
+/// Preset provider for quick-add.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderPreset {
+    OpenAI,
+    Anthropic,
+    Xai,
+    Gemini,
+}
+
+impl ProviderPreset {
+    pub fn url(&self) -> &'static str {
+        match self {
+            Self::OpenAI => "https://api.openai.com/v1",
+            Self::Anthropic => "https://api.anthropic.com/v1",
+            Self::Xai => "https://api.x.ai/v1",
+            Self::Gemini => "https://generativelanguage.googleapis.com/v1",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::OpenAI => "OpenAI",
+            Self::Anthropic => "Anthropic",
+            Self::Xai => "xAI",
+            Self::Gemini => "Gemini",
+        }
+    }
+
+    pub fn provider_type(&self) -> openai_protocol::worker::ProviderType {
+        match self {
+            Self::OpenAI => openai_protocol::worker::ProviderType::OpenAI,
+            Self::Anthropic => openai_protocol::worker::ProviderType::Anthropic,
+            Self::Xai => openai_protocol::worker::ProviderType::XAI,
+            Self::Gemini => openai_protocol::worker::ProviderType::Gemini,
+        }
+    }
+
+    pub fn runtime_type(&self) -> openai_protocol::worker::RuntimeType {
+        openai_protocol::worker::RuntimeType::External
+    }
+
+    pub fn all() -> &'static [ProviderPreset] {
+        &[Self::OpenAI, Self::Anthropic, Self::Xai, Self::Gemini]
+    }
+}
+
+/// Items in the worker action menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionMenuItem {
+    UpdatePriority,
+    UpdateCost,
+    UpdateApiKey,
+    FlushCache,
+    ToggleHealthCheck,
+}
+
+impl ActionMenuItem {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::UpdatePriority => "Update priority",
+            Self::UpdateCost => "Update cost",
+            Self::UpdateApiKey => "Update API key",
+            Self::FlushCache => "Flush cache",
+            Self::ToggleHealthCheck => "Toggle health check",
+        }
+    }
+
+    pub fn all() -> &'static [ActionMenuItem] {
+        &[
+            Self::UpdatePriority,
+            Self::UpdateCost,
+            Self::UpdateApiKey,
+            Self::FlushCache,
+            Self::ToggleHealthCheck,
+        ]
+    }
+}

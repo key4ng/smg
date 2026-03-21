@@ -1,52 +1,80 @@
 use ratatui::{
     layout::{Constraint, Flex, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::Style,
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
-const HELP_TEXT: &str = "\
+use super::theme;
+use crate::types::View;
+
+fn help_text(view: View) -> String {
+    let mut text = String::from("\
 Navigation
   1-5          Switch view (Pulse/Workers/Models/Traffic/Mesh)
+  q / Ctrl+C   Quit
+  ?            Toggle this help
+  /            Filter
+  :            Command mode
+  Esc          Close overlay / clear filter
+
+");
+
+    match view {
+        View::Workers => {
+            text.push_str("\
+Workers View
   j / Down     Move selection down
   k / Up       Move selection up
-  q / Ctrl+C   Quit
-
-Workers View
+  Enter        Toggle worker detail panel
+  e            Action menu (priority, cost, flush cache, ...)
   a            Add worker (enters command mode)
   d            Delete selected worker
-  /            Filter workers
-  :            Command mode
 
+");
+        }
+        _ => {
+            text.push_str("\
+Navigation
+  j / Down     Move selection down
+  k / Up       Move selection up
+
+");
+        }
+    }
+
+    text.push_str("\
 Commands
   :add <url> [--provider <p>] [--runtime <r>]
-                   Add a worker (provider auto-sets runtime=external)
+                   Add a worker
   :delete <id>     Delete a worker by ID
+  :priority <id> <n>   Set worker priority
+  :cost <id> <n>       Set worker cost
+  :flush-cache <id>    Flush worker cache
+  :toggle-health <id>  Toggle health check
+  :add-openai          Quick-add OpenAI worker
   :quit            Quit the TUI
 
 Providers: openai, anthropic, gemini, xai
 Runtimes:  sglang (default), vllm, trtllm, external
+");
 
-General
-  ?            Toggle this help
-  Esc          Close overlay / clear filter
-";
+    text
+}
 
-pub fn render_help(f: &mut Frame) {
+pub fn render_help(f: &mut Frame, view: View) {
     let popup = centered_rect(60, 70, f.area());
     f.render_widget(Clear, popup);
 
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Help ")
-        .title_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
-        .border_style(Style::default().fg(Color::Cyan));
+        .title_style(theme::title())
+        .border_style(Style::default().fg(theme::BORDER))
+        .style(Style::default().bg(theme::PANEL_BG));
 
-    let paragraph = Paragraph::new(HELP_TEXT)
+    let paragraph = Paragraph::new(help_text(view))
+        .style(Style::default().fg(theme::TEXT))
         .block(block)
         .wrap(Wrap { trim: false });
 

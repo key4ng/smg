@@ -57,10 +57,13 @@ pub fn render(f: &mut Frame, app: &App) {
 
     // Overlays (rendered last)
     if app.show_help {
-        help::render_help(f);
+        help::render_help(f, app.view);
     }
     if app.confirm_delete.is_some() {
         dialog::render_delete_dialog(f, app);
+    }
+    if app.confirm_flush.is_some() {
+        dialog::render_flush_dialog(f, app);
     }
     filter::render_filter(f, app, footer_area);
 }

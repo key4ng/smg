@@ -1,11 +1,12 @@
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
     widgets::Paragraph,
     Frame,
 };
 
+use super::theme;
 use crate::{
     app::App,
     types::{InputMode, View},
@@ -52,9 +53,9 @@ pub fn render_footer(f: &mut Frame, app: &App, area: Rect) {
                 vec![
                     Span::styled(
                         format!(" {key} "),
-                        Style::default().fg(Color::Black).bg(Color::DarkGray),
+                        Style::default().fg(theme::ACCENT).bg(theme::PANEL_BG),
                     ),
-                    Span::styled(format!("{desc} "), Style::default().fg(Color::Gray)),
+                    Span::styled(format!("{desc} "), Style::default().fg(theme::TEXT_MUTED)),
                 ]
             })
             .collect::<Vec<_>>(),
@@ -64,9 +65,9 @@ pub fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     // Status message
     if let Some(msg) = &app.status_message {
         let style = if msg.starts_with("Error") {
-            Style::default().fg(Color::Red)
+            Style::default().fg(theme::RED)
         } else {
-            Style::default().fg(Color::Green)
+            Style::default().fg(theme::GREEN)
         };
         f.render_widget(Paragraph::new(msg.as_str()).style(style), status_area);
     }

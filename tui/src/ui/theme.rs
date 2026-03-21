@@ -1,24 +1,24 @@
 use ratatui::style::{Color, Modifier, Style};
 
-// Tokyo Night palette
-pub const BG: Color = Color::Rgb(26, 27, 38);         // #1a1b26
-pub const PANEL_BG: Color = Color::Rgb(36, 40, 59);   // #24283b
-pub const STATS_BG: Color = Color::Rgb(30, 32, 48);   // #1e2030
-pub const BORDER: Color = Color::Rgb(59, 66, 97);     // #3b4261
-pub const TEXT: Color = Color::Rgb(192, 202, 245);     // #c0caf5
-pub const TEXT_MUTED: Color = Color::Rgb(86, 95, 137); // #565f89
-pub const ACCENT: Color = Color::Rgb(122, 162, 247);   // #7aa2f7
-pub const GREEN: Color = Color::Rgb(158, 206, 106);    // #9ece6a
-pub const YELLOW: Color = Color::Rgb(224, 175, 104);   // #e0af68
-pub const RED: Color = Color::Rgb(247, 118, 142);      // #f7768e
-pub const PURPLE: Color = Color::Rgb(187, 154, 247);   // #bb9af7
+// Terminal-native ANSI 16 colors — adapts to user's terminal theme.
+pub const BG: Color = Color::Reset;               // terminal default background
+pub const PANEL_BG: Color = Color::Reset;          // same as terminal
+pub const STATS_BG: Color = Color::Reset;          // same as terminal
+pub const BORDER: Color = Color::DarkGray;
+pub const TEXT: Color = Color::Reset;               // terminal default foreground
+pub const TEXT_MUTED: Color = Color::DarkGray;
+pub const ACCENT: Color = Color::Blue;
+pub const GREEN: Color = Color::Green;
+pub const YELLOW: Color = Color::Yellow;
+pub const RED: Color = Color::Red;
+pub const PURPLE: Color = Color::Magenta;
 
 /// Style for panel titles (accent + bold).
 pub fn title() -> Style {
     Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
 }
 
-/// Style for section labels (muted + uppercase convention).
+/// Style for section labels (muted).
 pub fn label() -> Style {
     Style::default().fg(TEXT_MUTED)
 }

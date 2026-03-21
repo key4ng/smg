@@ -236,14 +236,24 @@ impl SmgClient {
     }
 
     /// Send a streaming POST request, returning the raw response for SSE processing.
+    /// Uses a longer timeout and passes OPENAI_API_KEY as bearer token for BYOK.
     pub async fn stream_request(
         &self,
         path: &str,
         body: &serde_json::Value,
     ) -> Result<reqwest::Response> {
         let url = format!("{}{}", self.gateway_url, path);
-        let mut req = self.http.post(&url).json(body);
+        // Use a longer timeout for streaming chat
+        let stream_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()?;
+        let mut req = stream_client.post(&url).json(body);
+        // Pass API key: prefer SMG_API_KEY, then OPENAI_API_KEY from env
         if let Some(key) = &self.api_key {
+            req = req.bearer_auth(key);
+        } else if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+            req = req.bearer_auth(key);
+        } else if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
             req = req.bearer_auth(key);
         }
         Ok(req.send().await?.error_for_status()?)

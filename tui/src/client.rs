@@ -50,6 +50,8 @@ pub struct WorkerInfo {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelRef {
     pub id: String,
+    #[serde(default)]
+    pub model_type: Vec<String>,
 }
 
 /// Stats block: `{ prefill_count, decode_count, regular_count }`.

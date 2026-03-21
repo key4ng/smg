@@ -570,21 +570,44 @@ impl App {
     fn cycle_chat_model(&mut self) {
         let state = self.state.read().unwrap();
 
-        // Try /v1/models first, fall back to worker model lists
-        let mut models: Vec<String> = state
-            .models
-            .as_ref()
-            .map(|m| m.data.iter().map(|d| d.id.clone()).collect())
-            .unwrap_or_default();
-
-        if models.is_empty() {
-            // Collect models from workers
-            if let Some(ref workers) = state.workers {
-                for w in &workers.workers {
-                    for m in &w.models {
-                        if !models.contains(&m.id) {
-                            models.push(m.id.clone());
-                        }
+        // Collect chat-capable models from workers (has model_type info)
+        let mut models: Vec<String> = Vec::new();
+        if let Some(ref workers) = state.workers {
+            for w in &workers.workers {
+                for m in &w.models {
+                    // Only include models that support chat
+                    let is_chat = m.model_type.is_empty()
+                        || m.model_type.iter().any(|t| t == "chat");
+                    if !is_chat {
+                        continue;
+                    }
+                    // Skip date-suffixed variants (e.g. gpt-4o-2024-08-06)
+                    if m.id.chars().rev().take(8).all(|c| c.is_ascii_digit() || c == '-')
+                        && m.id.contains("-202")
+                    {
+                        continue;
+                    }
+                    // Skip -chat-latest, -codex, -search, -instruct variants
+                    if m.id.ends_with("-chat-latest")
+                        || m.id.contains("-codex")
+                        || m.id.contains("-search")
+                        || m.id.contains("-instruct")
+                        || m.id.contains("-preview")
+                        || m.id.contains("-tts")
+                    {
+                        continue;
+                    }
+                    // Skip legacy models
+                    if m.id.starts_with("babbage")
+                        || m.id.starts_with("davinci")
+                        || m.id.starts_with("gpt-3.5")
+                        || m.id == "gpt-4"
+                        || m.id == "gpt-4-turbo"
+                    {
+                        continue;
+                    }
+                    if !models.contains(&m.id) {
+                        models.push(m.id.clone());
                     }
                 }
             }

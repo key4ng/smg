@@ -235,6 +235,20 @@ impl SmgClient {
         Ok(resp)
     }
 
+    /// Send a streaming POST request, returning the raw response for SSE processing.
+    pub async fn stream_request(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response> {
+        let url = format!("{}{}", self.gateway_url, path);
+        let mut req = self.http.post(&url).json(body);
+        if let Some(key) = &self.api_key {
+            req = req.bearer_auth(key);
+        }
+        Ok(req.send().await?.error_for_status()?)
+    }
+
     /// Fetch raw Prometheus metrics text from the metrics endpoint.
     pub async fn fetch_metrics(&self) -> Result<String> {
         let url = format!("{}/metrics", self.metrics_url);

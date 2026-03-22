@@ -7,6 +7,7 @@ pub enum View {
     Pulse,
     Workers,
     Chat,
+    Logs,
     Traffic,
     Mesh,
 }
@@ -18,8 +19,9 @@ impl View {
             KeyCode::Char('1') => Some(Self::Pulse),
             KeyCode::Char('2') => Some(Self::Workers),
             KeyCode::Char('3') => Some(Self::Chat),
-            KeyCode::Char('4') => Some(Self::Traffic),
-            KeyCode::Char('5') => Some(Self::Mesh),
+            KeyCode::Char('4') => Some(Self::Logs),
+            KeyCode::Char('5') => Some(Self::Traffic),
+            KeyCode::Char('6') => Some(Self::Mesh),
             _ => None,
         }
     }
@@ -30,6 +32,7 @@ impl View {
             Self::Pulse => "Pulse",
             Self::Workers => "Workers",
             Self::Chat => "Chat",
+            Self::Logs => "Logs",
             Self::Traffic => "Traffic",
             Self::Mesh => "Mesh",
         }
@@ -41,6 +44,7 @@ impl View {
             Self::Pulse,
             Self::Workers,
             Self::Chat,
+            Self::Logs,
             Self::Traffic,
             Self::Mesh,
         ]
@@ -52,8 +56,9 @@ impl View {
             Self::Pulse => 1,
             Self::Workers => 2,
             Self::Chat => 3,
-            Self::Traffic => 4,
-            Self::Mesh => 5,
+            Self::Logs => 4,
+            Self::Traffic => 5,
+            Self::Mesh => 6,
         }
     }
 }

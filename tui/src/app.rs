@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use openai_protocol::worker::{ProviderType, RuntimeType, WorkerSpec};
@@ -42,7 +44,28 @@ pub struct App {
     pub chat_previous_response_id: Option<String>,
     chat_stream_rx: Option<mpsc::UnboundedReceiver<String>>,
 
+    // Logs
+    pub log_entries: VecDeque<LogEntry>,
+    pub log_scroll: u16,
+    pub log_auto_scroll: bool,
+
     status_clear_at: Option<std::time::Instant>,
+}
+
+const MAX_LOG_ENTRIES: usize = 1000;
+
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub level: LogLevel,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogLevel {
+    Info,
+    Warn,
+    Error,
 }
 
 impl App {
@@ -72,6 +95,9 @@ impl App {
             chat_endpoint: ChatEndpoint::default(),
             chat_previous_response_id: None,
             chat_stream_rx: None,
+            log_entries: VecDeque::with_capacity(MAX_LOG_ENTRIES),
+            log_scroll: u16::MAX,
+            log_auto_scroll: true,
             status_clear_at: None,
         }
     }
@@ -106,6 +132,22 @@ impl App {
             if std::time::Instant::now() >= deadline {
                 self.status_message = None;
                 self.status_clear_at = None;
+            }
+        }
+
+        // Log poller errors
+        {
+            let err_msg = {
+                let state = self.state.read().unwrap();
+                state.last_error.clone()
+            };
+            if let Some(err) = err_msg {
+                let already_logged = self.log_entries.back()
+                    .map(|e| e.message.contains(&err))
+                    .unwrap_or(false);
+                if !already_logged {
+                    self.add_log(LogLevel::Warn, &format!("Gateway: {err}"));
+                }
             }
         }
 
@@ -210,7 +252,8 @@ impl App {
             | KeyCode::Char('3')
             | KeyCode::Char('4')
             | KeyCode::Char('5')
-            | KeyCode::Char('6')) => {
+            | KeyCode::Char('6')
+            | KeyCode::Char('7')) => {
                 if let Some(v) = View::from_key(code) {
                     self.view = v;
                     self.selected_index = 0;
@@ -219,11 +262,26 @@ impl App {
 
             // Navigation
             KeyCode::Char('j') | KeyCode::Down => {
-                self.selected_index = self.selected_index.saturating_add(1);
-                self.clamp_selection();
+                if self.view == View::Logs {
+                    self.log_scroll = self.log_scroll.saturating_add(1);
+                    self.log_auto_scroll = false;
+                } else {
+                    self.selected_index = self.selected_index.saturating_add(1);
+                    self.clamp_selection();
+                }
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.selected_index = self.selected_index.saturating_sub(1);
+                if self.view == View::Logs {
+                    self.log_scroll = self.log_scroll.saturating_sub(1);
+                    self.log_auto_scroll = false;
+                } else {
+                    self.selected_index = self.selected_index.saturating_sub(1);
+                }
+            }
+            // Logs: G to jump to bottom
+            KeyCode::Char('G') if self.view == View::Logs => {
+                self.log_scroll = u16::MAX;
+                self.log_auto_scroll = true;
             }
 
             // Input modes
@@ -489,7 +547,7 @@ impl App {
                 self.set_status(format!("Endpoint: /v1/{}", self.chat_endpoint.label()));
             }
             // Number keys for view switching (only when not typing)
-            code @ (KeyCode::Char('1') | KeyCode::Char('2') | KeyCode::Char('4') | KeyCode::Char('5'))
+            code @ (KeyCode::Char('1') | KeyCode::Char('2') | KeyCode::Char('4') | KeyCode::Char('5') | KeyCode::Char('6'))
                 if self.chat_input.is_empty() && !self.chat_streaming =>
             {
                 if let Some(v) = View::from_key(code) {
@@ -881,8 +939,24 @@ impl App {
     }
 
     fn set_status(&mut self, msg: String) {
+        let level = if msg.starts_with("Error") { LogLevel::Error } else { LogLevel::Info };
+        self.add_log(level, &msg);
         self.status_message = Some(msg);
         self.status_clear_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+    }
+
+    fn add_log(&mut self, level: LogLevel, message: &str) {
+        if self.log_entries.len() >= MAX_LOG_ENTRIES {
+            self.log_entries.pop_front();
+        }
+        self.log_entries.push_back(LogEntry {
+            timestamp: chrono::Utc::now(),
+            level,
+            message: message.to_string(),
+        });
+        if self.log_auto_scroll {
+            self.log_scroll = u16::MAX;
+        }
     }
 
     fn clamp_selection(&mut self) {

@@ -4,6 +4,7 @@ pub mod detail;
 mod filter;
 mod footer;
 mod help;
+mod logs;
 pub mod models;
 mod chat;
 mod pulse;
@@ -50,6 +51,7 @@ pub fn render(f: &mut Frame, app: &App) {
         View::Pulse => pulse::render_pulse(f, app, content_area),
         View::Workers => workers::render_workers(f, app, content_area),
         View::Chat => chat::render_chat(f, app, content_area),
+        View::Logs => logs::render_logs(f, app, content_area),
         View::Traffic | View::Mesh => {
             render_placeholder(f, app.view, content_area);
         }

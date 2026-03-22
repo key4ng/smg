@@ -39,6 +39,7 @@ pub struct App {
     pub chat_streaming: bool,
     pub chat_scroll: u16,
     pub chat_endpoint: ChatEndpoint,
+    pub chat_previous_response_id: Option<String>,
     chat_stream_rx: Option<mpsc::UnboundedReceiver<String>>,
 
     status_clear_at: Option<std::time::Instant>,
@@ -65,10 +66,11 @@ impl App {
             confirm_flush: None,
             chat_messages: Vec::new(),
             chat_input: String::new(),
-            chat_model: "gpt-4o-mini".to_string(),
+            chat_model: "gpt-5.4-nano".to_string(),
             chat_streaming: false,
             chat_scroll: 0,
             chat_endpoint: ChatEndpoint::default(),
+            chat_previous_response_id: None,
             chat_stream_rx: None,
             status_clear_at: None,
         }
@@ -118,6 +120,10 @@ impl App {
                             self.chat_streaming = false;
                             self.chat_stream_rx = None;
                             break;
+                        } else if token.starts_with("\n[RESPONSE_ID]") {
+                            let id = token.trim_start_matches("\n[RESPONSE_ID]").to_string();
+                            self.chat_previous_response_id = Some(id);
+                            continue;
                         } else if token.starts_with("\n[ERROR]") {
                             let err = token.trim_start_matches("\n[ERROR]").to_string();
                             if let Some(msg) = self.chat_messages.last_mut() {
@@ -478,6 +484,7 @@ impl App {
             }
             KeyCode::BackTab if !self.chat_streaming => {
                 self.chat_endpoint = self.chat_endpoint.cycle();
+                self.chat_previous_response_id = None; // reset multi-turn on endpoint switch
                 self.set_status(format!("Endpoint: /v1/{}", self.chat_endpoint.label()));
             }
             // Number keys for view switching (only when not typing)
@@ -515,17 +522,32 @@ impl App {
                 self.chat_scroll = u16::MAX;
 
                 // Build messages for API
-                let api_messages: Vec<serde_json::Value> = self
-                    .chat_messages
-                    .iter()
-                    .filter(|m| !m.content.is_empty())
-                    .map(|m| {
-                        serde_json::json!({
-                            "role": m.role,
-                            "content": m.content,
-                        })
-                    })
-                    .collect();
+                let api_messages: Vec<serde_json::Value> = match self.chat_endpoint {
+                    ChatEndpoint::Chat => {
+                        // Single turn: only the latest user message
+                        vec![serde_json::json!({
+                            "role": "user",
+                            "content": self.chat_messages.iter()
+                                .rev()
+                                .find(|m| m.role == "user")
+                                .map(|m| m.content.as_str())
+                                .unwrap_or(""),
+                        })]
+                    }
+                    ChatEndpoint::Responses => {
+                        // Multi-turn via previous_response_id
+                        self.chat_messages
+                            .iter()
+                            .filter(|m| !m.content.is_empty())
+                            .map(|m| {
+                                serde_json::json!({
+                                    "role": m.role,
+                                    "content": m.content,
+                                })
+                            })
+                            .collect()
+                    }
+                };
 
                 let (tx, rx) = mpsc::unbounded_channel();
                 self.chat_stream_rx = Some(rx);
@@ -533,8 +555,9 @@ impl App {
                 let client = self.client.clone();
                 let model = self.chat_model.clone();
                 let endpoint = self.chat_endpoint;
+                let prev_id = self.chat_previous_response_id.clone();
                 tokio::spawn(async move {
-                    crate::chat::stream_chat(&client, &model, &api_messages, endpoint, tx).await;
+                    crate::chat::stream_chat(&client, &model, &api_messages, endpoint, prev_id, tx).await;
                 });
             }
             // Esc cancels input or stops streaming

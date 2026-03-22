@@ -3,7 +3,7 @@ use tokio::sync::mpsc;
 
 use crate::client::SmgClient;
 
-/// A chat message in the playground conversation.
+/// A chat message in the conversation.
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
     pub role: String,
@@ -34,18 +34,21 @@ impl ChatEndpoint {
     }
 }
 
-/// Stream a chat completion from the SMG gateway, sending tokens via `tx`.
-/// Sends "\n[DONE]" when complete, "\n[ERROR]..." on failure.
+/// Stream a chat from the SMG gateway, sending tokens via `tx`.
+/// Special signals: "\n[DONE]", "\n[ERROR]...", "\n[RESPONSE_ID]..."
 pub async fn stream_chat(
     client: &SmgClient,
     model: &str,
     messages: &[serde_json::Value],
     endpoint: ChatEndpoint,
+    previous_response_id: Option<String>,
     tx: mpsc::UnboundedSender<String>,
 ) {
     match endpoint {
         ChatEndpoint::Chat => stream_chat_completions(client, model, messages, tx).await,
-        ChatEndpoint::Responses => stream_responses(client, model, messages, tx).await,
+        ChatEndpoint::Responses => {
+            stream_responses(client, model, messages, previous_response_id, tx).await
+        }
     }
 }
 
@@ -69,31 +72,46 @@ async fn stream_chat_completions(
         }
     };
 
-    process_sse_stream(resp, "choices", tx).await;
+    process_sse_stream(resp, tx).await;
 }
 
 async fn stream_responses(
     client: &SmgClient,
     model: &str,
     messages: &[serde_json::Value],
+    previous_response_id: Option<String>,
     tx: mpsc::UnboundedSender<String>,
 ) {
-    // Convert chat messages to responses API input format
-    let input: Vec<serde_json::Value> = messages
-        .iter()
-        .map(|m| {
-            serde_json::json!({
-                "role": m["role"],
-                "content": m["content"],
-            })
+    // For multi-turn: use previous_response_id + only the latest user message
+    let body = if let Some(ref prev_id) = previous_response_id {
+        // Only send the latest user message with previous_response_id
+        let latest_input = messages
+            .last()
+            .map(|m| m["content"].as_str().unwrap_or(""))
+            .unwrap_or("");
+        serde_json::json!({
+            "model": model,
+            "input": latest_input,
+            "previous_response_id": prev_id,
+            "stream": true,
         })
-        .collect();
-
-    let body = serde_json::json!({
-        "model": model,
-        "input": input,
-        "stream": true,
-    });
+    } else {
+        // First turn: send all messages as input
+        let input: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "role": m["role"],
+                    "content": m["content"],
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "model": model,
+            "input": input,
+            "stream": true,
+        })
+    };
 
     let resp = match client.stream_request("/v1/responses", &body).await {
         Ok(r) => r,
@@ -103,7 +121,7 @@ async fn stream_responses(
         }
     };
 
-    // Responses API uses a different streaming format
+    // Process responses API streaming format
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
 
@@ -134,9 +152,14 @@ async fn stream_responses(
 
             if let Some(data) = line.strip_prefix("data: ") {
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data) {
-                    // Responses API sends different event types
                     let event_type = parsed["type"].as_str().unwrap_or("");
                     match event_type {
+                        "response.created" => {
+                            // Extract response ID for multi-turn
+                            if let Some(id) = parsed["response"]["id"].as_str() {
+                                let _ = tx.send(format!("\n[RESPONSE_ID]{id}"));
+                            }
+                        }
                         "response.output_text.delta" => {
                             if let Some(delta) = parsed["delta"].as_str() {
                                 let _ = tx.send(delta.to_string());
@@ -156,11 +179,7 @@ async fn stream_responses(
     let _ = tx.send("\n[DONE]".to_string());
 }
 
-async fn process_sse_stream(
-    resp: reqwest::Response,
-    _format: &str,
-    tx: mpsc::UnboundedSender<String>,
-) {
+async fn process_sse_stream(resp: reqwest::Response, tx: mpsc::UnboundedSender<String>) {
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
 

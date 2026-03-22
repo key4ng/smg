@@ -140,6 +140,15 @@ impl SmgClient {
         Ok(())
     }
 
+    /// Check if the gateway is alive (accepting connections), regardless of worker readiness.
+    pub async fn check_alive(&self) -> Result<()> {
+        // Any response (even 503) means the server is up
+        self.request(reqwest::Method::GET, "/readiness")
+            .send()
+            .await?;
+        Ok(())
+    }
+
     pub async fn list_workers(&self) -> Result<WorkersResponse> {
         Ok(self
             .request(reqwest::Method::GET, "/workers")

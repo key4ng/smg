@@ -118,8 +118,8 @@ async fn main() -> Result<()> {
                                     tracing::error!("Failed to check gateway status: {e}");
                                 }
                             }
-                            if client.check_health().await.is_ok() {
-                                tracing::info!("Gateway is ready");
+                            if client.check_alive().await.is_ok() {
+                                tracing::info!("Gateway is up and accepting connections");
                                 break;
                             }
                             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;

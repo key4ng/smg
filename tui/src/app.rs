@@ -484,7 +484,8 @@ impl App {
             }
             KeyCode::BackTab if !self.chat_streaming => {
                 self.chat_endpoint = self.chat_endpoint.cycle();
-                self.chat_previous_response_id = None; // reset multi-turn on endpoint switch
+                self.chat_previous_response_id = None;
+                self.chat_messages.clear(); // clear conversation on endpoint switch
                 self.set_status(format!("Endpoint: /v1/{}", self.chat_endpoint.label()));
             }
             // Number keys for view switching (only when not typing)

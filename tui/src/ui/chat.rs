@@ -22,10 +22,21 @@ pub fn render_chat(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_messages(f: &mut Frame, app: &App, area: Rect) {
+    let mode_hint = match app.chat_endpoint {
+        crate::chat::ChatEndpoint::Chat => "full history",
+        crate::chat::ChatEndpoint::Responses => {
+            if app.chat_previous_response_id.is_some() {
+                "prev_response_id"
+            } else {
+                "first turn"
+            }
+        }
+    };
     let title = format!(
-        " Chat — {} — /v1/{} ",
+        " Chat — {} — /v1/{} ({}) ",
         app.chat_model,
         app.chat_endpoint.label(),
+        mode_hint,
     );
     let block = Block::default()
         .title(title)

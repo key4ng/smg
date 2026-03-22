@@ -523,32 +523,17 @@ impl App {
                 self.chat_scroll = u16::MAX;
 
                 // Build messages for API
-                let api_messages: Vec<serde_json::Value> = match self.chat_endpoint {
-                    ChatEndpoint::Chat => {
-                        // Single turn: only the latest user message
-                        vec![serde_json::json!({
-                            "role": "user",
-                            "content": self.chat_messages.iter()
-                                .rev()
-                                .find(|m| m.role == "user")
-                                .map(|m| m.content.as_str())
-                                .unwrap_or(""),
-                        })]
-                    }
-                    ChatEndpoint::Responses => {
-                        // Multi-turn via previous_response_id
-                        self.chat_messages
-                            .iter()
-                            .filter(|m| !m.content.is_empty())
-                            .map(|m| {
-                                serde_json::json!({
-                                    "role": m.role,
-                                    "content": m.content,
-                                })
-                            })
-                            .collect()
-                    }
-                };
+                let api_messages: Vec<serde_json::Value> = self
+                    .chat_messages
+                    .iter()
+                    .filter(|m| !m.content.is_empty())
+                    .map(|m| {
+                        serde_json::json!({
+                            "role": m.role,
+                            "content": m.content,
+                        })
+                    })
+                    .collect();
 
                 let (tx, rx) = mpsc::unbounded_channel();
                 self.chat_stream_rx = Some(rx);

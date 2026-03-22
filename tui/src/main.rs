@@ -87,10 +87,16 @@ async fn main() -> Result<()> {
                     &metrics_port.to_string(),
                 ];
                 tracing::info!("Running: smg {}", launch_args.join(" "));
+                let log_file = std::fs::File::create("/tmp/smg-gateway.log")
+                    .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
+                let log_file2 = log_file.try_clone().unwrap_or_else(|_| {
+                    std::fs::File::create("/dev/null").unwrap()
+                });
+                tracing::info!("Gateway logs: /tmp/smg-gateway.log");
                 let child = tokio::process::Command::new("smg")
                     .args(&launch_args)
-                    .stdout(std::process::Stdio::inherit())
-                    .stderr(std::process::Stdio::inherit())
+                    .stdout(std::process::Stdio::from(log_file))
+                    .stderr(std::process::Stdio::from(log_file2))
                     .spawn();
                 match child {
                     Ok(mut child) => {

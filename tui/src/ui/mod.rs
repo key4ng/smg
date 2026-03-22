@@ -52,7 +52,7 @@ pub fn render(f: &mut Frame, app: &App) {
         View::Workers => workers::render_workers(f, app, content_area),
         View::Chat => chat::render_chat(f, app, content_area),
         View::Logs => logs::render_logs(f, app, content_area),
-        View::Traffic | View::Mesh => {
+        View::Benchmark | View::Traffic | View::Mesh => {
             render_placeholder(f, app.view, content_area);
         }
     }

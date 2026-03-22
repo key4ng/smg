@@ -8,6 +8,7 @@ pub enum View {
     Workers,
     Chat,
     Logs,
+    Benchmark,
     Traffic,
     Mesh,
 }
@@ -20,8 +21,9 @@ impl View {
             KeyCode::Char('2') => Some(Self::Workers),
             KeyCode::Char('3') => Some(Self::Chat),
             KeyCode::Char('4') => Some(Self::Logs),
-            KeyCode::Char('5') => Some(Self::Traffic),
-            KeyCode::Char('6') => Some(Self::Mesh),
+            KeyCode::Char('5') => Some(Self::Benchmark),
+            KeyCode::Char('6') => Some(Self::Traffic),
+            KeyCode::Char('7') => Some(Self::Mesh),
             _ => None,
         }
     }
@@ -33,6 +35,7 @@ impl View {
             Self::Workers => "Workers",
             Self::Chat => "Chat",
             Self::Logs => "Logs",
+            Self::Benchmark => "Benchmark",
             Self::Traffic => "Traffic",
             Self::Mesh => "Mesh",
         }
@@ -45,6 +48,7 @@ impl View {
             Self::Workers,
             Self::Chat,
             Self::Logs,
+            Self::Benchmark,
             Self::Traffic,
             Self::Mesh,
         ]
@@ -57,8 +61,9 @@ impl View {
             Self::Workers => 2,
             Self::Chat => 3,
             Self::Logs => 4,
-            Self::Traffic => 5,
-            Self::Mesh => 6,
+            Self::Benchmark => 5,
+            Self::Traffic => 6,
+            Self::Mesh => 7,
         }
     }
 }

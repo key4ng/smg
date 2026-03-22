@@ -257,7 +257,8 @@ impl App {
             | KeyCode::Char('4')
             | KeyCode::Char('5')
             | KeyCode::Char('6')
-            | KeyCode::Char('7')) => {
+            | KeyCode::Char('7')
+            | KeyCode::Char('8')) => {
                 if let Some(v) = View::from_key(code) {
                     self.view = v;
                     self.selected_index = 0;
@@ -551,7 +552,7 @@ impl App {
                 self.set_status(format!("Endpoint: /v1/{}", self.chat_endpoint.label()));
             }
             // Number keys for view switching (only when not typing)
-            code @ (KeyCode::Char('1') | KeyCode::Char('2') | KeyCode::Char('4') | KeyCode::Char('5') | KeyCode::Char('6'))
+            code @ (KeyCode::Char('1') | KeyCode::Char('2') | KeyCode::Char('4') | KeyCode::Char('5') | KeyCode::Char('6') | KeyCode::Char('7'))
                 if self.chat_input.is_empty() && !self.chat_streaming =>
             {
                 if let Some(v) = View::from_key(code) {

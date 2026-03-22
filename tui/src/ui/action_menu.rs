@@ -103,9 +103,9 @@ pub fn render_add_menu(f: &mut Frame, app: &App) {
     match state {
         AddMenuState::SelectCategory => {
             render_menu(f, " Add Worker ", &[
-                ("1", "External Provider", "OpenAI, Anthropic, xAI, Gemini"),
-                ("2", "Local Backend", "sglang, vllm"),
-                ("3", "Custom URL", "manual configuration"),
+                ("1", "External", "openai, anthropic, etc."),
+                ("2", "Local", "sglang, vllm"),
+                ("3", "Custom URL", "manual"),
             ]);
         }
         AddMenuState::SelectProvider => {

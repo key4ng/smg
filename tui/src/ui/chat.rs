@@ -135,8 +135,19 @@ fn render_messages(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from("")); // blank line between messages
     }
 
-    // Calculate scroll
-    let total_lines = lines.len() as u16;
+    // Calculate wrapped line count for proper scrolling
+    let width = inner.width as usize;
+    let total_lines: u16 = if width > 0 {
+        lines
+            .iter()
+            .map(|line| {
+                let line_width: usize = line.spans.iter().map(|s| s.content.len()).sum();
+                ((line_width.max(1) + width - 1) / width) as u16 // ceil division
+            })
+            .sum()
+    } else {
+        lines.len() as u16
+    };
     let visible = inner.height;
     let max_scroll = total_lines.saturating_sub(visible);
     let scroll = if app.chat_scroll >= max_scroll {

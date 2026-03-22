@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
                 );
                 let port = extract_port(&cli.gateway_url).unwrap_or(30000);
                 let metrics_port = extract_port(&cli.metrics_url).unwrap_or(29000);
-                // Try `smg` binary first, fall back to `cargo run -p smg`
+                // Try `smg launch` first, fall back to `cargo run -p smg`
                 let launch_args = [
                     "launch",
                     "--port",
@@ -87,14 +87,12 @@ async fn main() -> Result<()> {
                     "--prometheus-port",
                     &metrics_port.to_string(),
                 ];
-                let child = match tokio::process::Command::new("smg")
+                let child = tokio::process::Command::new("smg")
                     .args(&launch_args)
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .spawn()
-                {
-                    Ok(child) => Ok(child),
-                    Err(_) => {
+                    .or_else(|_| {
                         tracing::info!("'smg' not in PATH, trying 'cargo run -p smg'...");
                         let mut cargo_args = vec!["run", "-p", "smg", "--"];
                         cargo_args.extend_from_slice(&launch_args);
@@ -103,8 +101,7 @@ async fn main() -> Result<()> {
                             .stdout(std::process::Stdio::null())
                             .stderr(std::process::Stdio::null())
                             .spawn()
-                    }
-                };
+                    });
                 match child {
                     Ok(child) => {
                         // Poll health endpoint until gateway is ready (up to 120s for cargo builds)

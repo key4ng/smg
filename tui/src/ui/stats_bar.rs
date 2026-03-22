@@ -103,14 +103,35 @@ fn render_stats_cards(f: &mut Frame, state: &GatewayState, area: Rect, bg: Style
         Some((&health_text.0, health_text.1)),
     );
 
-    // Card 2: Models
-    let model_count = state.models.as_ref().map(|m| m.data.len()).unwrap_or(0);
-    let models_value = if state.connected {
-        model_count.to_string()
+    // Card 2: Circuit Breakers
+    let cb = &state.circuit_breakers;
+    let (cb_value, cb_detail) = if state.connected {
+        if cb.open > 0 {
+            (
+                format!("{} open", cb.open),
+                Some((format!("{} failures", cb.total_failures), theme::RED)),
+            )
+        } else if cb.closed > 0 {
+            (
+                "all closed".to_string(),
+                Some((format!("{} workers", cb.closed), theme::GREEN)),
+            )
+        } else {
+            ("--".to_string(), None)
+        }
     } else {
-        "--".to_string()
+        ("--".to_string(), None)
     };
-    render_card(f, cols[1], bg, "MODELS", &models_value, None);
+    let cb_value_color = if cb.open > 0 { theme::RED } else { theme::GREEN };
+    render_card_colored(
+        f,
+        cols[1],
+        bg,
+        "BREAKERS",
+        &cb_value,
+        cb_value_color,
+        cb_detail.as_ref().map(|(s, c)| (s.as_str(), *c)),
+    );
 
     // Card 3: Throughput
     let (tp_value, tp_detail) = if state.connected {
@@ -196,6 +217,54 @@ fn render_card(
     );
 
     // Detail line (centered)
+    if let Some((text, color)) = detail {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                text,
+                Style::default().fg(color),
+            )))
+            .alignment(Alignment::Center)
+            .style(bg),
+            rows[2],
+        );
+    }
+}
+
+fn render_card_colored(
+    f: &mut Frame,
+    area: Rect,
+    bg: Style,
+    label: &str,
+    value: &str,
+    value_color: ratatui::style::Color,
+    detail: Option<(&str, ratatui::style::Color)>,
+) {
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(area);
+
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(label, theme::label())))
+            .alignment(Alignment::Center)
+            .style(bg),
+        rows[0],
+    );
+
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            value,
+            Style::default()
+                .fg(value_color)
+                .add_modifier(Modifier::BOLD),
+        )))
+        .alignment(Alignment::Center)
+        .style(bg),
+        rows[1],
+    );
+
     if let Some((text, color)) = detail {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(

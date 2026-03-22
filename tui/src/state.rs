@@ -40,6 +40,17 @@ pub struct GatewayState {
 
     /// GPU information from nvidia-smi (None if not available).
     pub gpus: Option<Vec<GpuInfo>>,
+
+    /// Circuit breaker status parsed from Prometheus metrics.
+    pub circuit_breakers: CircuitBreakerSummary,
+}
+
+/// Summary of circuit breaker states across all workers.
+#[derive(Debug, Clone, Default)]
+pub struct CircuitBreakerSummary {
+    pub closed: u32,
+    pub open: u32,
+    pub total_failures: u64,
 }
 
 /// GPU information parsed from nvidia-smi.
@@ -104,6 +115,31 @@ async fn query_gpus() -> Option<Vec<GpuInfo>> {
         .collect();
 
     if gpus.is_empty() { None } else { Some(gpus) }
+}
+
+/// Parse circuit breaker state from Prometheus metrics.
+fn parse_circuit_breakers(metrics_text: &str) -> CircuitBreakerSummary {
+    let mut closed = 0u32;
+    let mut open = 0u32;
+    let mut total_failures = 0u64;
+
+    for line in metrics_text.lines() {
+        if line.starts_with("smg_worker_cb_state{") {
+            if let Some(val) = line.rsplit_once(' ').and_then(|(_, v)| v.parse::<i32>().ok()) {
+                match val {
+                    0 => closed += 1,
+                    1 => open += 1,
+                    _ => {} // -1 = stale, skip
+                }
+            }
+        } else if line.starts_with("smg_worker_cb_consecutive_failures{") {
+            if let Some(val) = line.rsplit_once(' ').and_then(|(_, v)| v.parse::<u64>().ok()) {
+                total_failures += val;
+            }
+        }
+    }
+
+    CircuitBreakerSummary { closed, open, total_failures }
 }
 
 /// Parse total request count from Prometheus metrics text.
@@ -228,6 +264,7 @@ async fn poll_once(client: &SmgClient, state: &SharedState, interval_secs: u64) 
 
     // Compute requests/sec from Prometheus counter (works for external workers).
     if let Ok(metrics_text) = metrics {
+        s.circuit_breakers = parse_circuit_breakers(&metrics_text);
         let current_count = parse_request_count(&metrics_text);
         if let Some(prev) = s.prev_request_count {
             let delta = current_count.saturating_sub(prev);

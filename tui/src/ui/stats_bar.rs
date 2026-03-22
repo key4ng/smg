@@ -105,32 +105,30 @@ fn render_stats_cards(f: &mut Frame, state: &GatewayState, area: Rect, bg: Style
 
     // Card 2: Circuit Breakers
     let cb = &state.circuit_breakers;
-    let (cb_value, cb_detail) = if state.connected {
-        if cb.open > 0 {
-            (
-                format!("{} open", cb.open),
-                Some((format!("{} failures", cb.total_failures), theme::RED)),
-            )
-        } else if cb.closed > 0 {
-            (
-                "all closed".to_string(),
-                Some((format!("{} workers", cb.closed), theme::GREEN)),
-            )
-        } else {
-            ("--".to_string(), None)
-        }
+    let cb_total = cb.closed + cb.open;
+    let cb_value = if state.connected {
+        cb_total.to_string()
     } else {
-        ("--".to_string(), None)
+        "--".to_string()
     };
-    let cb_value_color = if cb.open > 0 { theme::RED } else { theme::GREEN };
-    render_card_colored(
+
+    let cb_detail = if !state.connected {
+        ("--".to_string(), theme::TEXT_MUTED)
+    } else if cb.open > 0 {
+        (format!("{} open", cb.open), theme::RED)
+    } else if cb.closed > 0 {
+        ("all closed".to_string(), theme::GREEN)
+    } else {
+        ("--".to_string(), theme::TEXT_MUTED)
+    };
+
+    render_card(
         f,
         cols[1],
         bg,
-        "BREAKERS",
+        "CIRCUIT BREAKERS",
         &cb_value,
-        cb_value_color,
-        cb_detail.as_ref().map(|(s, c)| (s.as_str(), *c)),
+        Some((&cb_detail.0, cb_detail.1)),
     );
 
     // Card 3: Throughput

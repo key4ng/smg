@@ -160,9 +160,14 @@ impl SmgClient {
     }
 
     pub async fn add_worker(&self, spec: &WorkerSpec) -> Result<serde_json::Value> {
+        // Build JSON manually because WorkerSpec.api_key has skip_serializing
+        let mut body = serde_json::to_value(spec)?;
+        if let Some(ref key) = spec.api_key {
+            body["api_key"] = serde_json::Value::String(key.clone());
+        }
         Ok(self
             .request(reqwest::Method::POST, "/workers")
-            .json(spec)
+            .json(&body)
             .send()
             .await?
             .error_for_status()?

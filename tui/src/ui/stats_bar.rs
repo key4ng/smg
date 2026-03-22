@@ -291,13 +291,3 @@ fn render_separator(f: &mut Frame, area: Rect) {
     );
 }
 
-/// Format large numbers: 1234 → "1.2k", 1234567 → "1.2M"
-fn format_number(n: f64) -> String {
-    if n >= 1_000_000.0 {
-        format!("{:.1}M", n / 1_000_000.0)
-    } else if n >= 1_000.0 {
-        format!("{:.1}k", n / 1_000.0)
-    } else {
-        format!("{:.0}", n)
-    }
-}

@@ -265,6 +265,16 @@ impl ProviderPreset {
         }
     }
 
+    /// Environment variable name for this provider's API key.
+    pub fn env_key(&self) -> Option<&'static str> {
+        match self {
+            Self::OpenAI => Some("OPENAI_API_KEY"),
+            Self::Anthropic => Some("ANTHROPIC_API_KEY"),
+            Self::Xai => Some("XAI_API_KEY"),
+            Self::Gemini => Some("GEMINI_API_KEY"),
+        }
+    }
+
     pub fn runtime_type(&self) -> openai_protocol::worker::RuntimeType {
         openai_protocol::worker::RuntimeType::External
     }

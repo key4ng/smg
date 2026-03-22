@@ -48,6 +48,7 @@ pub struct App {
     pub log_entries: VecDeque<LogEntry>,
     pub log_scroll: u16,
     pub log_auto_scroll: bool,
+    pub log_sub_tab: LogSubTab,
 
     // Spawned local worker processes
     pub worker_children: Vec<(String, tokio::process::Child)>, // (description, child)
@@ -71,6 +72,23 @@ pub enum LogLevel {
     Info,
     Warn,
     Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogSubTab {
+    Tui,
+    Gateway,
+    Worker(String), // port number as string
+}
+
+impl LogSubTab {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Tui => "a:TUI".to_string(),
+            Self::Gateway => "b:SMG".to_string(),
+            Self::Worker(port) => format!("c:{port}"),
+        }
+    }
 }
 
 impl App {
@@ -103,6 +121,7 @@ impl App {
             log_entries: VecDeque::with_capacity(MAX_LOG_ENTRIES),
             log_scroll: u16::MAX,
             log_auto_scroll: true,
+            log_sub_tab: LogSubTab::Tui,
             worker_children: Vec::new(),
             claimed_gpus: std::collections::HashMap::new(),
             status_clear_at: None,
@@ -290,6 +309,35 @@ impl App {
             KeyCode::Char('G') if self.view == View::Logs => {
                 self.log_scroll = u16::MAX;
                 self.log_auto_scroll = true;
+            }
+            // Logs: a/b/c to switch sub-tabs
+            KeyCode::Char('a') if self.view == View::Logs => {
+                self.log_sub_tab = LogSubTab::Tui;
+                self.log_scroll = u16::MAX;
+            }
+            KeyCode::Char('b') if self.view == View::Logs => {
+                self.log_sub_tab = LogSubTab::Gateway;
+                self.log_scroll = u16::MAX;
+            }
+            KeyCode::Char('c') if self.view == View::Logs => {
+                // Cycle through worker logs
+                let tabs = self.worker_log_tabs();
+                if tabs.is_empty() {
+                    self.set_status("No worker logs available".to_string());
+                } else {
+                    let current_port = match &self.log_sub_tab {
+                        LogSubTab::Worker(p) => Some(p.clone()),
+                        _ => None,
+                    };
+                    let next = if let Some(cur) = current_port {
+                        let idx = tabs.iter().position(|(_, p)| p == &cur).unwrap_or(0);
+                        (idx + 1) % tabs.len()
+                    } else {
+                        0
+                    };
+                    self.log_sub_tab = LogSubTab::Worker(tabs[next].1.clone());
+                    self.log_scroll = u16::MAX;
+                }
             }
 
             // Input modes
@@ -723,6 +771,25 @@ impl App {
                             if self.claimed_gpus.remove(&url).is_some() {
                                 self.add_log(LogLevel::Info, &format!("Released GPU claim for {url}"));
                             }
+                            // Kill the backend process if it was spawned by the TUI
+                            if let Some(port) = url.rsplit(':').next() {
+                                let port = port.trim_matches('/').to_string();
+                                let match_str = format!("port {port}");
+                                let mut kill_result = None;
+                                for (desc, child) in &mut self.worker_children {
+                                    if desc.contains(&match_str) {
+                                        kill_result = Some((desc.clone(), child.kill().await));
+                                        break;
+                                    }
+                                }
+                                if let Some((desc, result)) = kill_result {
+                                    match result {
+                                        Ok(_) => self.add_log(LogLevel::Info, &format!("Killed backend: {desc}")),
+                                        Err(e) => self.add_log(LogLevel::Warn, &format!("Failed to kill backend: {e}")),
+                                    }
+                                    self.worker_children.retain(|(d, _)| !d.contains(&match_str));
+                                }
+                            }
                             self.set_status(format!("Worker {id} deleted"));
                         }
                         Err(e) => self.set_status(format!("Error: {e}")),
@@ -822,7 +889,18 @@ impl App {
                 KeyCode::Esc => self.add_menu_state = Some(AddMenuState::SelectProvider),
                 KeyCode::Enter => {
                     let provider = *provider;
-                    let api_key = input.clone();
+                    // Use entered key, or fall back to env var
+                    let api_key = if input.is_empty() {
+                        provider.env_key()
+                            .and_then(|var| std::env::var(var).ok())
+                            .unwrap_or_default()
+                    } else {
+                        input.clone()
+                    };
+                    if api_key.is_empty() {
+                        self.set_status("No API key provided".to_string());
+                        return;
+                    }
                     self.add_menu_state = None;
                     let mut spec = WorkerSpec::new(provider.url());
                     spec.provider = Some(provider.provider_type());
@@ -1040,6 +1118,27 @@ impl App {
                 self.set_status(format!("Failed to start worker: {e}"));
             }
         }
+    }
+
+    /// Get available worker log files as (label, port) pairs.
+    pub fn worker_log_tabs(&self) -> Vec<(String, String)> {
+        let mut tabs = Vec::new();
+        for (desc, _child) in &self.worker_children {
+            // desc is like "sglang http Llama-3.2-1B (TP=1) (port 37595)"
+            if let Some(port_start) = desc.rfind("port ") {
+                let port = desc[port_start + 5..].trim_end_matches(')').to_string();
+                // Extract short model name (first 5 chars of model label)
+                let short = desc
+                    .split_whitespace()
+                    .nth(2)
+                    .unwrap_or("work")
+                    .chars()
+                    .take(5)
+                    .collect::<String>();
+                tabs.push((format!("{short}-{port}"), port));
+            }
+        }
+        tabs
     }
 
     fn add_log(&mut self, level: LogLevel, message: &str) {

@@ -166,6 +166,18 @@ async fn stream_responses(
                             }
                         }
                         "response.completed" | "response.done" => {
+                            // Extract text from completed response (sglang sends full text here, not deltas)
+                            if let Some(outputs) = parsed["response"]["output"].as_array() {
+                                for output in outputs {
+                                    if let Some(contents) = output["content"].as_array() {
+                                        for content in contents {
+                                            if let Some(text) = content["text"].as_str() {
+                                                let _ = tx.send(text.to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             let _ = tx.send("\n[DONE]".to_string());
                             return;
                         }

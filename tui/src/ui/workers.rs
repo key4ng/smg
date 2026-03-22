@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     widgets::{Cell, Row, Table, TableState},
     Frame,
 };
@@ -37,10 +37,17 @@ pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
         vec![]
     };
 
+    // Build per-worker load lookup from /get_loads
+    let worker_loads: std::collections::HashMap<String, &crate::client::WorkerLoad> =
+        state.loads.as_ref().map(|l| {
+            l.workers.iter().map(|wl| (wl.worker.clone(), wl)).collect()
+        }).unwrap_or_default();
+    let worker_rps = &state.worker_rps;
+
     // Build rows and table based on terminal width
     let (header, rows, widths): (Row, Vec<Row>, Vec<Constraint>) = if width < 80 {
-        // Narrow: ID, Health, Load (3 columns)
-        let header_cells = ["ID", "Health", "Load"]
+        // Narrow: ID, Health, Running (3 columns)
+        let header_cells = ["ID", "Health", "Running"]
             .iter()
             .map(|h| {
                 Cell::from(*h).style(
@@ -62,10 +69,11 @@ pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
                 };
                 let health_text = if w.is_healthy { "healthy" } else { "unhealthy" };
 
+                let (running, _) = get_worker_load_info(&worker_loads, worker_rps, &w.url);
                 Row::new(vec![
                     Cell::from(truncate(&w.id, 12)).style(Style::default().fg(theme::TEXT)),
                     Cell::from(health_text).style(health_style),
-                    Cell::from(w.load.to_string()).style(Style::default().fg(theme::TEXT)),
+                    Cell::from(running).style(Style::default().fg(theme::TEXT)),
                 ])
                 .style(Style::default().bg(theme::BG))
             })
@@ -74,13 +82,13 @@ pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
         let widths = vec![
             Constraint::Fill(1),
             Constraint::Length(10),
-            Constraint::Length(6),
+            Constraint::Length(8),
         ];
 
         (header, rows, widths)
     } else if width < 100 {
-        // Compact: ID, URL, Health, Load (4 columns)
-        let header_cells = ["ID", "URL", "Health", "Load"]
+        // Compact: ID, URL, Health, Running (4 columns)
+        let header_cells = ["ID", "URL", "Health", "Running"]
             .iter()
             .map(|h| {
                 Cell::from(*h).style(
@@ -102,11 +110,12 @@ pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
                 };
                 let health_text = if w.is_healthy { "healthy" } else { "unhealthy" };
 
+                let (running, _) = get_worker_load_info(&worker_loads, worker_rps, &w.url);
                 Row::new(vec![
                     Cell::from(truncate(&w.id, 12)).style(Style::default().fg(theme::TEXT)),
-                    Cell::from(truncate(&w.url, 30)).style(Style::default().fg(theme::TEXT)),
+                    Cell::from(shorten_url(&w.url)).style(Style::default().fg(theme::TEXT)),
                     Cell::from(health_text).style(health_style),
-                    Cell::from(w.load.to_string()).style(Style::default().fg(theme::TEXT)),
+                    Cell::from(running).style(Style::default().fg(theme::TEXT)),
                 ])
                 .style(Style::default().bg(theme::BG))
             })
@@ -116,13 +125,13 @@ pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(14),
             Constraint::Fill(1),
             Constraint::Length(10),
-            Constraint::Length(6),
+            Constraint::Length(8),
         ];
 
         (header, rows, widths)
     } else if width < 120 {
-        // Medium: ID, URL, Type, Runtime, Health, Load (6 columns)
-        let header_cells = ["ID", "URL", "Type", "Runtime", "Health", "Load"]
+        // Medium: ID, URL, Runtime, Health, Running, Token Usage (6 columns)
+        let header_cells = ["ID", "URL", "Runtime", "Health", "Running", "Tok Usage"]
             .iter()
             .map(|h| {
                 Cell::from(*h).style(
@@ -144,15 +153,16 @@ pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
                 };
                 let health_text = if w.is_healthy { "healthy" } else { "unhealthy" };
 
+                let (running, token_usage) = get_worker_load_info(&worker_loads, worker_rps, &w.url);
+
                 Row::new(vec![
                     Cell::from(truncate(&w.id, 12)).style(Style::default().fg(theme::TEXT)),
-                    Cell::from(truncate(&w.url, 30)).style(Style::default().fg(theme::TEXT)),
-                    Cell::from(w.worker_type.as_str())
-                        .style(Style::default().fg(theme::TEXT_MUTED)),
+                    Cell::from(shorten_url(&w.url)).style(Style::default().fg(theme::TEXT)),
                     Cell::from(w.runtime_type.as_str())
                         .style(Style::default().fg(theme::TEXT_MUTED)),
                     Cell::from(health_text).style(health_style),
-                    Cell::from(w.load.to_string()).style(Style::default().fg(theme::TEXT)),
+                    Cell::from(running).style(Style::default().fg(theme::TEXT)),
+                    Cell::from(token_usage).style(Style::default().fg(theme::TEXT)),
                 ])
                 .style(Style::default().bg(theme::BG))
             })
@@ -164,14 +174,14 @@ pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(10),
             Constraint::Length(10),
             Constraint::Length(10),
-            Constraint::Length(6),
+            Constraint::Length(10),
         ];
 
         (header, rows, widths)
     } else {
-        // Full: all 8 columns (current)
+        // Full: all 8 columns
         let header_cells = [
-            "ID", "URL", "Type", "Mode", "Runtime", "Models", "Health", "Load",
+            "ID", "URL", "Mode", "Runtime", "Models", "Health", "Running", "Tok Usage",
         ]
         .iter()
         .map(|h| {
@@ -206,11 +216,11 @@ pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
                     model_names
                 };
 
+                let (running, token_usage) = get_worker_load_info(&worker_loads, worker_rps, &w.url);
+
                 Row::new(vec![
                     Cell::from(truncate(&w.id, 12)).style(Style::default().fg(theme::TEXT)),
-                    Cell::from(truncate(&w.url, 30)).style(Style::default().fg(theme::TEXT)),
-                    Cell::from(w.worker_type.as_str())
-                        .style(Style::default().fg(theme::TEXT_MUTED)),
+                    Cell::from(shorten_url(&w.url)).style(Style::default().fg(theme::TEXT)),
                     Cell::from(w.connection_mode.as_str())
                         .style(Style::default().fg(theme::TEXT_MUTED)),
                     Cell::from(w.runtime_type.as_str())
@@ -218,7 +228,8 @@ pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
                     Cell::from(truncate(&models_display, 20))
                         .style(Style::default().fg(theme::TEXT)),
                     Cell::from(health_text).style(health_style),
-                    Cell::from(w.load.to_string()).style(Style::default().fg(theme::TEXT)),
+                    Cell::from(running).style(Style::default().fg(theme::TEXT)),
+                    Cell::from(token_usage).style(Style::default().fg(theme::TEXT)),
                 ])
                 .style(Style::default().bg(theme::BG))
             })
@@ -226,13 +237,13 @@ pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
 
         let widths = vec![
             Constraint::Length(14),
-            Constraint::Fill(1),
-            Constraint::Length(10),
+            Constraint::Length(22),
             Constraint::Length(8),
             Constraint::Length(10),
             Constraint::Length(22),
             Constraint::Length(10),
-            Constraint::Length(6),
+            Constraint::Length(8),
+            Constraint::Length(10),
         ];
 
         (header, rows, widths)
@@ -245,8 +256,8 @@ pub fn render_workers(f: &mut Frame, app: &App, area: Rect) {
         .block(block)
         .row_highlight_style(
             Style::default()
-                .fg(theme::TEXT)
-                .bg(theme::BORDER)
+                .fg(Color::Black)
+                .bg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
         );
 
@@ -286,4 +297,46 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         format!("{}…", &s[..max - 1])
     }
+}
+
+/// Shorten a URL: strip scheme, keep host:port
+fn shorten_url(url: &str) -> String {
+    url.trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("grpc://")
+        .trim_end_matches('/')
+        .split('/')
+        .next()
+        .unwrap_or(url)
+        .to_string()
+}
+
+/// Get running reqs and token usage for a worker from /get_loads data.
+/// Returns (running_reqs_str, token_usage_str).
+fn get_worker_load_info(
+    loads: &std::collections::HashMap<String, &crate::client::WorkerLoad>,
+    worker_rps: &std::collections::HashMap<String, f64>,
+    worker_url: &str,
+) -> (String, String) {
+    // HTTP sglang workers: use num_running_reqs and token_usage from /get_loads
+    if let Some(wl) = loads.get(worker_url) {
+        if let Some(ref details) = wl.details {
+            if let Some(load) = details.loads.first() {
+                let running = format!("{}", load.num_running_reqs);
+                let usage = format!("{:.1}%", load.token_usage * 100.0);
+                return (running, usage);
+            }
+        }
+    }
+    // gRPC/local workers: show req/s from Prometheus per-worker counts
+    if worker_url.starts_with("grpc://") {
+        let rps = worker_rps.get(worker_url).copied().unwrap_or(0.0);
+        return (format!("{rps:.1} r/s"), "N/A".to_string());
+    }
+    // External workers
+    if worker_url.starts_with("https://") {
+        let rps = worker_rps.get(worker_url).copied().unwrap_or(0.0);
+        return (format!("{rps:.1} r/s"), "N/A".to_string());
+    }
+    ("0".to_string(), "0.0%".to_string())
 }

@@ -13,23 +13,17 @@ pub fn render_pulse(f: &mut Frame, app: &App, area: Rect) {
     let width = area.width;
     let state = app.state.read().unwrap();
 
-    // Determine which panels have data
     let has_cluster = state.cluster.is_some();
     let has_gpus = state.gpus.is_some();
     let has_node_panel = has_cluster || has_gpus;
-    let has_token_usage = state
-        .loads
-        .as_ref()
-        .map(|l| l.workers.iter().any(|w| w.details.is_some()))
-        .unwrap_or(false);
 
     if width < 80 {
         // Narrow: single column
         let mut constraints: Vec<Constraint> = vec![Constraint::Fill(1)]; // Worker Health
         if has_node_panel {
-            constraints.push(Constraint::Fill(1)); // Node/GPU
+            constraints.push(Constraint::Fill(1));
         }
-        constraints.push(Constraint::Fill(1)); // Rate Limits
+        constraints.push(Constraint::Fill(1)); // Throughput
 
         let rows = Layout::vertical(constraints).split(area);
         let mut i = 0;
@@ -39,7 +33,7 @@ pub fn render_pulse(f: &mut Frame, app: &App, area: Rect) {
             render_node_status(f, &state, rows[i]);
             i += 1;
         }
-        render_rate_limits(f, &state, rows[i]);
+        render_throughput_compact(f, &state, rows[i]);
         return;
     }
 
@@ -49,114 +43,132 @@ pub fn render_pulse(f: &mut Frame, app: &App, area: Rect) {
     ])
     .split(area);
 
-    // Left column: Worker Health + (Node/GPU if available) + Rate Limits
+    // Left column: Worker Health + Node/GPU (if available)
     let left = if has_node_panel {
         Layout::vertical([
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 2),
+            Constraint::Ratio(1, 2),
         ])
         .split(columns[0])
     } else {
-        Layout::vertical([
-            Constraint::Ratio(1, 2),
-            Constraint::Ratio(1, 2),
-        ])
-        .split(columns[0])
+        Layout::vertical([Constraint::Fill(1)])
+            .split(columns[0])
     };
 
-    // Right column: Throughput + (Token Usage if available) + Cache Hit
-    let right = if has_token_usage {
-        Layout::vertical([
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
-        ])
-        .split(columns[1])
-    } else {
-        Layout::vertical([
-            Constraint::Ratio(1, 2),
-            Constraint::Ratio(1, 2),
-        ])
-        .split(columns[1])
-    };
+    // Right column: Throughput sparkline + Request Stats
+    let right = Layout::vertical([
+        Constraint::Ratio(1, 2),
+        Constraint::Ratio(1, 2),
+    ])
+    .split(columns[1]);
 
     // Left panels
     render_worker_health(f, &state, left[0]);
     if has_node_panel {
         render_node_status(f, &state, left[1]);
-        render_rate_limits(f, &state, left[2]);
-    } else {
-        render_rate_limits(f, &state, left[1]);
     }
 
     // Right panels
     if width < 100 {
         render_throughput_compact(f, &state, right[0]);
-        if has_token_usage {
-            render_token_usage(f, &state, right[1]);
-            render_cache_hit_compact(f, &state, right[2]);
-        } else {
-            render_cache_hit_compact(f, &state, right[1]);
-        }
     } else {
         render_throughput(f, &state, right[0]);
-        if has_token_usage {
-            render_token_usage(f, &state, right[1]);
-            render_cache_hit(f, &state, right[2]);
-        } else {
-            render_cache_hit(f, &state, right[1]);
-        }
     }
+    render_request_stats(f, &state, right[1]);
 }
 
 fn render_worker_health(f: &mut Frame, state: &crate::state::GatewayState, area: Rect) {
     let block = theme::panel(" WORKER HEALTH ");
 
     let lines = if let Some(ref w) = state.workers {
-        w.workers
-            .iter()
-            .map(|worker| {
+        // Group workers: external by provider name, local by model name
+        let mut groups: Vec<(String, Vec<&crate::client::WorkerInfo>)> = Vec::new();
+
+        for worker in &w.workers {
+            let group_name = if worker.runtime_type == "external" {
+                // Use provider name from URL (e.g. "OpenAI" from "api.openai.com")
+                let host = worker.url
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .split('/')
+                    .next()
+                    .unwrap_or("");
+                if host.contains("openai") {
+                    "OpenAI".to_string()
+                } else if host.contains("anthropic") {
+                    "Anthropic".to_string()
+                } else if host.contains("x.ai") {
+                    "xAI".to_string()
+                } else if host.contains("googleapis") {
+                    "Gemini".to_string()
+                } else {
+                    format!("External ({host})")
+                }
+            } else {
+                // Local: group by first model name
+                worker.models.first()
+                    .map(|m| m.id.clone())
+                    .unwrap_or_else(|| "No model".to_string())
+            };
+
+            if let Some(group) = groups.iter_mut().find(|(name, _)| name == &group_name) {
+                group.1.push(worker);
+            } else {
+                groups.push((group_name, vec![worker]));
+            }
+        }
+
+        let mut lines: Vec<Line> = Vec::new();
+        for (group_name, workers) in groups {
+            // Group header
+            lines.push(Line::from(Span::styled(
+                group_name,
+                ratatui::style::Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            )));
+
+            // Worker details indented
+            for worker in workers {
                 let (dot_color, status) = if worker.is_healthy {
                     (theme::GREEN, "healthy")
                 } else {
                     (theme::RED, "unhealthy")
                 };
+                let status_style = ratatui::style::Style::default()
+                    .fg(dot_color)
+                    .add_modifier(ratatui::style::Modifier::BOLD);
 
-                // Short name from URL (e.g. "api.openai.com" from "https://api.openai.com/v1")
-                let name = worker
-                    .url
+                let host = worker.url
                     .trim_start_matches("https://")
                     .trim_start_matches("http://")
+                    .trim_start_matches("grpc://")
                     .trim_end_matches('/')
                     .split('/')
                     .next()
                     .unwrap_or(&worker.url);
 
-                let rt = if worker.runtime_type.is_empty() {
-                    "unknown"
-                } else {
-                    &worker.runtime_type
-                };
+                let rt = if worker.runtime_type.is_empty() { "unknown" } else { &worker.runtime_type };
+                let conn = if worker.connection_mode.is_empty() { "" } else { &worker.connection_mode };
 
-                let status_style = if worker.is_healthy {
-                    ratatui::style::Style::default()
-                        .fg(theme::GREEN)
-                        .add_modifier(ratatui::style::Modifier::BOLD)
-                } else {
-                    ratatui::style::Style::default()
-                        .fg(theme::RED)
-                        .add_modifier(ratatui::style::Modifier::BOLD)
-                };
-
-                Line::from(vec![
-                    Span::styled("● ", ratatui::style::Style::default().fg(dot_color)),
-                    Span::styled(format!("{name} "), theme::text()),
+                lines.push(Line::from(vec![
+                    Span::styled("  ● ", ratatui::style::Style::default().fg(dot_color)),
+                    Span::styled(format!("{host} "), theme::text()),
                     Span::styled(format!("{rt} "), theme::label()),
+                    if !conn.is_empty() {
+                        Span::styled(format!("{conn} "), theme::label())
+                    } else {
+                        Span::raw("")
+                    },
                     Span::styled(status, status_style),
-                ])
-            })
-            .collect()
+                ]));
+            }
+        }
+        if lines.is_empty() {
+            vec![Line::styled("No workers", theme::label())]
+        } else {
+            lines
+        }
     } else {
         vec![Line::styled("No data", theme::label())]
     };
@@ -316,16 +328,11 @@ fn render_rate_limits(f: &mut Frame, state: &crate::state::GatewayState, area: R
 }
 
 fn render_throughput(f: &mut Frame, state: &crate::state::GatewayState, area: Rect) {
-    // Determine if we have gen_throughput data or should use req/s fallback
-    let use_rps = !state.requests_per_sec_history.is_empty()
-        && !state.throughput_history.iter().any(|&v| v > 0.0 && state.requests_per_sec_history.is_empty());
-
-    let title = if use_rps { " THROUGHPUT (req/s) " } else { " THROUGHPUT " };
-    let block = theme::panel(title);
+    let block = theme::panel(" THROUGHPUT ");
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    if state.throughput_history.is_empty() {
+    if state.throughput_history.is_empty() && state.requests_per_sec_history.is_empty() {
         f.render_widget(
             Paragraph::new(Line::styled("No data", theme::label())),
             inner,
@@ -333,36 +340,40 @@ fn render_throughput(f: &mut Frame, state: &crate::state::GatewayState, area: Re
         return;
     }
 
-    // Header: latest value
-    let latest = state.throughput_history.back().copied().unwrap_or(0.0);
-    let unit = if use_rps { "req/s" } else { "tok/s" };
-    let header_area = Rect {
-        x: inner.x,
-        y: inner.y,
-        width: inner.width,
-        height: 1,
-    };
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("Latest: ", theme::label()),
-            Span::styled(format!("{:.1} {}", latest, unit), theme::text().fg(theme::GREEN)),
-        ])),
-        header_area,
-    );
+    // Header: latest values
+    let rps = state.requests_per_sec_history.back().copied().unwrap_or(0.0);
+    let in_tps = state.input_tps_history.back().copied().unwrap_or(0.0);
+    let out_tps = state.output_tps_history.back().copied().unwrap_or(0.0);
+    let total_tps = in_tps + out_tps;
 
-    // Sparkline area
-    if inner.height > 2 {
+    let mut header_spans = vec![
+        Span::styled("req/s: ", theme::label()),
+        Span::styled(format!("{rps:.1}"), theme::text().fg(theme::GREEN)),
+    ];
+    if total_tps > 0.0 {
+        header_spans.extend([
+            Span::styled("  tok/s: ", theme::label()),
+            Span::styled(format!("{total_tps:.0}"), theme::text().fg(theme::GREEN)),
+            Span::styled(format!("  (in:{in_tps:.0} out:{out_tps:.0})"), theme::label()),
+        ]);
+    }
+
+    let header_area = Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 };
+    f.render_widget(Paragraph::new(Line::from(header_spans)), header_area);
+    let header_height = 1u16;
+
+    // Sparkline area (total tok/s)
+    let sparkline_start = inner.y + header_height;
+    let remaining = inner.height.saturating_sub(header_height + 1);
+    if remaining > 0 {
         let sparkline_area = Rect {
-            x: inner.x,
-            y: inner.y + 1,
-            width: inner.width,
-            height: inner.height.saturating_sub(2),
+            x: inner.x, y: sparkline_start, width: inner.width, height: remaining,
         };
         sparkline::render_sparkline(f, &state.throughput_history, theme::GREEN, sparkline_area);
     }
 
     // Time labels
-    if inner.height >= 2 {
+    if inner.height >= header_height + 2 {
         let label_area = Rect {
             x: inner.x,
             y: inner.y + inner.height.saturating_sub(1),
@@ -398,7 +409,7 @@ fn render_throughput_compact(f: &mut Frame, state: &crate::state::GatewayState, 
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("Latest: ", theme::label()),
-            Span::styled(format!("{:.1} tok/s", latest), theme::text().fg(theme::GREEN)),
+            Span::styled(format!("{:.1} req/s", latest), theme::text().fg(theme::GREEN)),
         ])),
         inner,
     );
@@ -535,4 +546,77 @@ fn render_cache_hit_compact(f: &mut Frame, state: &crate::state::GatewayState, a
         ])),
         inner,
     );
+}
+
+fn render_request_stats(f: &mut Frame, state: &crate::state::GatewayState, area: Rect) {
+    let block = theme::panel(" REQUEST STATS ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let avg_latency = state.avg_latency_history.back().copied().unwrap_or(0.0);
+    let connections = state.active_connections;
+    let inflight = state.inflight_requests;
+
+    // Format latency nicely
+    let latency_str = if avg_latency >= 1.0 {
+        format!("{:.2}s", avg_latency)
+    } else {
+        format!("{:.0}ms", avg_latency * 1000.0)
+    };
+    let latency_color = if avg_latency > 5.0 {
+        theme::RED
+    } else if avg_latency > 1.0 {
+        theme::YELLOW
+    } else {
+        theme::GREEN
+    };
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Avg Latency    ", theme::label()),
+            Span::styled(&latency_str, ratatui::style::Style::default().fg(latency_color)),
+        ]),
+        Line::from(vec![
+            Span::styled("Connections    ", theme::label()),
+            Span::styled(connections.to_string(), theme::text()),
+        ]),
+        Line::from(vec![
+            Span::styled("In-flight      ", theme::label()),
+            Span::styled(inflight.to_string(), theme::text()),
+        ]),
+    ];
+
+    // Latency sparkline if we have history
+    if state.avg_latency_history.len() > 1 && inner.height > 5 {
+        lines.push(Line::from(""));
+        let sparkline_area = Rect {
+            x: inner.x,
+            y: inner.y + 4,
+            width: inner.width,
+            height: inner.height.saturating_sub(5),
+        };
+        f.render_widget(Paragraph::new(lines), inner);
+        sparkline::render_sparkline(f, &state.avg_latency_history, theme::YELLOW, sparkline_area);
+
+        // Time label
+        if inner.height > 5 {
+            let label_area = Rect {
+                x: inner.x,
+                y: inner.y + inner.height.saturating_sub(1),
+                width: inner.width,
+                height: 1,
+            };
+            let padding = " ".repeat(label_area.width.saturating_sub(7) as usize);
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("-60s", theme::label()),
+                    Span::raw(padding),
+                    Span::styled("now", theme::label()),
+                ])),
+                label_area,
+            );
+        }
+    } else {
+        f.render_widget(Paragraph::new(lines), inner);
+    }
 }

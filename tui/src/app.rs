@@ -51,6 +51,8 @@ pub struct App {
 
     // Spawned local worker processes
     pub worker_children: Vec<(String, tokio::process::Child)>, // (description, child)
+    // GPUs claimed by spawned workers, keyed by worker URL (to avoid double-allocation)
+    claimed_gpus: std::collections::HashMap<String, Vec<u32>>,
 
     status_clear_at: Option<std::time::Instant>,
 }
@@ -92,7 +94,7 @@ impl App {
             confirm_flush: None,
             chat_messages: Vec::new(),
             chat_input: String::new(),
-            chat_model: "gpt-5.4-nano".to_string(),
+            chat_model: String::new(),
             chat_streaming: false,
             chat_scroll: 0,
             chat_endpoint: ChatEndpoint::default(),
@@ -102,6 +104,7 @@ impl App {
             log_scroll: u16::MAX,
             log_auto_scroll: true,
             worker_children: Vec::new(),
+            claimed_gpus: std::collections::HashMap::new(),
             status_clear_at: None,
         }
     }
@@ -572,6 +575,14 @@ impl App {
                 if text.is_empty() {
                     return;
                 }
+                // Auto-select first model if none set
+                if self.chat_model.is_empty() {
+                    self.cycle_chat_model();
+                    if self.chat_model.is_empty() {
+                        self.set_status("No models available — add a worker first".to_string());
+                        return;
+                    }
+                }
                 self.chat_input.clear();
                 self.chat_messages.push(ChatMessage {
                     role: "user".to_string(),
@@ -642,12 +653,23 @@ impl App {
     fn cycle_chat_model(&mut self) {
         let state = self.state.read().unwrap();
 
-        // Collect models starting with "gpt-5.4" from workers
+        // Collect models from workers (filter external/OpenAI to gpt-5.4 prefix only)
         let mut models: Vec<String> = Vec::new();
         if let Some(ref workers) = state.workers {
             for w in &workers.workers {
+                let is_external = w.runtime_type == "external";
+                if is_external && w.models.is_empty() {
+                    // Wildcard external worker — add gpt-5.4-nano as placeholder
+                    if !models.contains(&"gpt-5.4-nano".to_string()) {
+                        models.push("gpt-5.4-nano".to_string());
+                    }
+                    continue;
+                }
                 for m in &w.models {
-                    if m.id.starts_with("gpt-5.4") && !models.contains(&m.id) {
+                    if is_external && !m.id.starts_with("gpt-5.4") {
+                        continue;
+                    }
+                    if !models.contains(&m.id) {
                         models.push(m.id.clone());
                     }
                 }
@@ -692,10 +714,17 @@ impl App {
     async fn handle_delete_confirm(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
-                if let Some((ref id, _)) = self.confirm_delete {
+                if let Some((ref id, ref url)) = self.confirm_delete {
                     let id = id.clone();
+                    let url = url.clone();
                     match self.client.delete_worker(&id).await {
-                        Ok(_) => self.set_status(format!("Worker {id} deleted")),
+                        Ok(_) => {
+                            // Release claimed GPUs for this worker
+                            if self.claimed_gpus.remove(&url).is_some() {
+                                self.add_log(LogLevel::Info, &format!("Released GPU claim for {url}"));
+                            }
+                            self.set_status(format!("Worker {id} deleted"));
+                        }
                         Err(e) => self.set_status(format!("Error: {e}")),
                     }
                 }
@@ -923,27 +952,36 @@ impl App {
             }
         };
 
-        // Check GPU availability
-        let gpu_count = check_gpu_count().await;
+        // Find GPUs with enough free memory, excluding already-claimed GPUs
+        let all_claimed: std::collections::HashSet<u32> = self.claimed_gpus.values().flatten().copied().collect();
+        let free_gpus: Vec<u32> = find_free_gpus()
+            .await
+            .into_iter()
+            .filter(|g| !all_claimed.contains(g))
+            .collect();
         let tp = model.tp();
-        if gpu_count == 0 {
-            self.set_status("No GPUs available (nvidia-smi not found or no GPUs detected)".to_string());
+        if free_gpus.is_empty() {
+            self.set_status("No GPUs available (all in use or claimed by pending workers)".to_string());
             return;
         }
-        if tp > gpu_count {
+        if (tp as usize) > free_gpus.len() {
             self.set_status(format!(
-                "Not enough GPUs: model requires TP={tp} but only {gpu_count} GPU(s) available"
+                "Not enough free GPUs: model requires TP={tp} but only {} unclaimed GPU(s) available",
+                free_gpus.len()
             ));
             return;
         }
+        // Pick the first `tp` free GPUs
+        let selected_gpus: Vec<u32> = free_gpus.into_iter().take(tp as usize).collect();
+        let cuda_devices = selected_gpus.iter().map(|g| g.to_string()).collect::<Vec<_>>().join(",");
 
         let model_id = model.model_id().to_string();
         let conn_label = if grpc { "grpc" } else { "http" };
         let (cmd, args) = runtime.launch_args(&model_id, tp, port, grpc);
         let desc = format!("{} {} {} (port {port})", runtime.label(), conn_label, model.label());
 
-        self.add_log(LogLevel::Info, &format!("Starting {desc}..."));
-        self.add_log(LogLevel::Info, &format!("Command: {cmd} {}", args.join(" ")));
+        self.add_log(LogLevel::Info, &format!("Starting {desc} on GPU [{cuda_devices}]..."));
+        self.add_log(LogLevel::Info, &format!("Command: CUDA_VISIBLE_DEVICES={cuda_devices} {cmd} {}", args.join(" ")));
 
         let log_path = format!("/tmp/smg-worker-{port}.log");
         let log_file = match std::fs::File::create(&log_path) {
@@ -957,6 +995,7 @@ impl App {
 
         match tokio::process::Command::new(&cmd)
             .args(&args)
+            .env("CUDA_VISIBLE_DEVICES", &cuda_devices)
             .stdout(std::process::Stdio::from(log_file))
             .stderr(std::process::Stdio::from(log_file2))
             .spawn()
@@ -968,49 +1007,34 @@ impl App {
                 );
                 self.worker_children.push((desc.clone(), child));
 
-                // Register with gateway in background
+                // Register with gateway immediately — SMG handles health checks itself
                 let url = if grpc {
                     format!("grpc://127.0.0.1:{port}")
                 } else {
                     format!("http://127.0.0.1:{port}")
                 };
+                // Track claimed GPUs so next worker won't pick the same ones
+                self.claimed_gpus.insert(url.clone(), selected_gpus);
                 let runtime_type = runtime.runtime_type();
                 let connection_mode = if grpc {
                     openai_protocol::worker::ConnectionMode::Grpc
                 } else {
                     openai_protocol::worker::ConnectionMode::Http
                 };
-                let desc2 = desc.clone();
-                let client2 = self.client.clone();
-                let health_url = format!("http://127.0.0.1:{port}/health");
-                let url2 = url.clone();
-
-                tokio::spawn(async move {
-                    // Poll worker health (up to 5 min for model loading)
-                    let deadline =
-                        tokio::time::Instant::now() + tokio::time::Duration::from_secs(300);
-                    loop {
-                        if tokio::time::Instant::now() >= deadline {
-                            tracing::warn!("Worker {desc2} did not become ready in 300s");
-                            return;
-                        }
-                        if reqwest::get(&health_url).await.is_ok() {
-                            break;
-                        }
-                        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                // Register with gateway immediately — SMG handles health checks
+                let mut spec = WorkerSpec::new(&url);
+                spec.runtime_type = runtime_type;
+                spec.connection_mode = connection_mode;
+                match self.client.add_worker(&spec).await {
+                    Ok(_) => {
+                        self.add_log(LogLevel::Info, &format!("Registered worker {url} with gateway"));
+                        self.set_status(format!("Started {desc} — registered with gateway"));
                     }
-
-                    // Register with gateway
-                    let mut spec = WorkerSpec::new(&url2);
-                    spec.runtime_type = runtime_type;
-                    spec.connection_mode = connection_mode;
-                    match client2.add_worker(&spec).await {
-                        Ok(_) => tracing::info!("Registered worker {url2} with gateway"),
-                        Err(e) => tracing::error!("Failed to register worker {url2}: {e}"),
+                    Err(e) => {
+                        self.add_log(LogLevel::Error, &format!("Failed to register worker {url}: {e}"));
+                        self.set_status(format!("Started {desc} but registration failed: {e}"));
                     }
-                });
-
-                self.set_status(format!("Launching {desc} — waiting for readiness..."));
+                }
             }
             Err(e) => {
                 self.set_status(format!("Failed to start worker: {e}"));
@@ -1044,9 +1068,10 @@ impl App {
 }
 
 /// Check how many GPUs are available via nvidia-smi. Returns 0 if not available.
-async fn check_gpu_count() -> u32 {
+/// Find GPUs with enough free memory (>2GB) and return their indices.
+async fn find_free_gpus() -> Vec<u32> {
     let output = tokio::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=index", "--format=csv,noheader"])
+        .args(["--query-gpu=index,memory.free", "--format=csv,noheader,nounits"])
         .output()
         .await;
     match output {
@@ -1054,9 +1079,20 @@ async fn check_gpu_count() -> u32 {
             String::from_utf8_lossy(&o.stdout)
                 .lines()
                 .filter(|l| !l.trim().is_empty())
-                .count() as u32
+                .filter_map(|line| {
+                    let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+                    if parts.len() >= 2 {
+                        let idx = parts[0].parse::<u32>().ok()?;
+                        let free_mb = parts[1].parse::<u64>().ok()?;
+                        // Only consider GPUs with >2GB free
+                        if free_mb > 2048 { Some(idx) } else { None }
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         }
-        _ => 0,
+        _ => Vec::new(),
     }
 }
 

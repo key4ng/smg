@@ -240,10 +240,10 @@ pub enum ProviderPreset {
 impl ProviderPreset {
     pub fn url(&self) -> &'static str {
         match self {
-            Self::OpenAI => "https://api.openai.com/v1",
-            Self::Anthropic => "https://api.anthropic.com/v1",
-            Self::Xai => "https://api.x.ai/v1",
-            Self::Gemini => "https://generativelanguage.googleapis.com/v1",
+            Self::OpenAI => "https://api.openai.com",
+            Self::Anthropic => "https://api.anthropic.com",
+            Self::Xai => "https://api.x.ai",
+            Self::Gemini => "https://generativelanguage.googleapis.com",
         }
     }
 

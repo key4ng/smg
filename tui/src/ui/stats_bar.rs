@@ -131,50 +131,48 @@ fn render_stats_cards(f: &mut Frame, state: &GatewayState, area: Rect, bg: Style
         Some((&cb_detail.0, cb_detail.1)),
     );
 
-    // Card 3: Throughput
-    let (tp_value, tp_detail) = if state.connected {
-        let has_gen = state.throughput_history.iter().any(|&v| v > 0.0)
-            && state.requests_per_sec_history.is_empty();
-        if has_gen {
-            let tp = state.throughput_history.back().copied().unwrap_or(0.0);
-            (format_number(tp), Some(("tok/s", theme::TEXT_MUTED)))
-        } else {
-            let rps = state.requests_per_sec_history.back().copied().unwrap_or(0.0);
-            (format!("{rps:.1}"), Some(("req/s", theme::TEXT_MUTED)))
-        }
+    // Card 3: REQ/S
+    let rps_value = if state.connected {
+        let rps = state.requests_per_sec_history.back().copied().unwrap_or(0.0);
+        format!("{rps:.1}")
     } else {
-        ("--".to_string(), None)
+        "--".to_string()
+    };
+    let inflight = if state.connected {
+        format!("{} in-flight", state.inflight_requests)
+    } else {
+        "--".to_string()
     };
     render_card(
         f,
         cols[2],
         bg,
-        "THROUGHPUT",
-        &tp_value,
-        tp_detail.map(|(s, c)| (s, c)),
+        "REQ/S",
+        &rps_value,
+        Some((&inflight, theme::TEXT_MUTED)),
     );
 
-    // Card 4: Avg Load with gauge bar
-    let (avg_load, load_color) = if state.connected {
-        let avg = state
-            .loads
-            .as_ref()
-            .map(|l| {
-                if l.workers.is_empty() {
-                    0.0
-                } else {
-                    l.workers.iter().map(|w| w.load as f64).sum::<f64>()
-                        / l.workers.len() as f64
-                }
-            })
-            .unwrap_or(0.0);
-        let ratio = (avg / 100.0).clamp(0.0, 1.0);
-        (avg, theme::severity(ratio))
+    // Card 4: AVG LATENCY with gauge bar
+    let avg_latency = state.avg_latency_history.back().copied().unwrap_or(0.0);
+    let (latency_value, latency_color) = if state.connected {
+        let latency_str = if avg_latency >= 1.0 {
+            format!("{:.2}s", avg_latency)
+        } else {
+            format!("{:.0}ms", avg_latency * 1000.0)
+        };
+        let color = if avg_latency > 5.0 {
+            theme::RED
+        } else if avg_latency > 1.0 {
+            theme::YELLOW
+        } else {
+            theme::GREEN
+        };
+        (latency_str, color)
     } else {
-        (0.0, theme::TEXT_MUTED)
+        ("--".to_string(), theme::TEXT_MUTED)
     };
 
-    render_load_card(f, cols[3], bg, avg_load, load_color, state.connected);
+    render_latency_card(f, cols[3], bg, &latency_value, latency_color, avg_latency, state.connected);
 }
 
 fn render_card(
@@ -228,12 +226,13 @@ fn render_card(
     }
 }
 
-fn render_load_card(
+fn render_latency_card(
     f: &mut Frame,
     area: Rect,
     bg: Style,
-    avg_load: f64,
-    load_color: ratatui::style::Color,
+    latency_value: &str,
+    latency_color: ratatui::style::Color,
+    avg_latency_secs: f64,
     connected: bool,
 ) {
     let rows = Layout::vertical([
@@ -245,23 +244,18 @@ fn render_load_card(
 
     // Label
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled("AVG LOAD", theme::label())))
+        Paragraph::new(Line::from(Span::styled("AVG LATENCY", theme::label())))
             .alignment(Alignment::Center)
             .style(bg),
         rows[0],
     );
 
-    // Big percentage
-    let value = if connected {
-        format!("{:.0}%", avg_load)
-    } else {
-        "--".to_string()
-    };
+    // Big value
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            &value,
+            latency_value,
             Style::default()
-                .fg(load_color)
+                .fg(latency_color)
                 .add_modifier(Modifier::BOLD),
         )))
         .alignment(Alignment::Center)
@@ -269,14 +263,14 @@ fn render_load_card(
         rows[1],
     );
 
-    // Gauge bar
+    // Gauge bar (0-5s scale)
     if connected {
-        let ratio = (avg_load / 100.0).clamp(0.0, 1.0);
+        let ratio = (avg_latency_secs / 5.0).clamp(0.0, 1.0);
         let bar_width = (area.width / 3).max(6) as usize;
         let (filled, empty, _pct) = sparkline::gauge_bar(ratio, bar_width);
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(filled, Style::default().fg(load_color)),
+                Span::styled(filled, Style::default().fg(latency_color)),
                 Span::styled(empty, Style::default().fg(theme::TEXT_MUTED)),
             ]))
             .alignment(Alignment::Center)

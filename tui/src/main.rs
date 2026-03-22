@@ -85,6 +85,9 @@ async fn main() -> Result<()> {
                     &port.to_string(),
                     "--prometheus-port",
                     &metrics_port.to_string(),
+                    "--enable-igw",
+                    "--policy",
+                    "round_robin",
                 ];
                 tracing::info!("Running: smg {}", launch_args.join(" "));
                 let log_file = std::fs::File::create("/tmp/smg-gateway.log")

@@ -89,21 +89,14 @@ pub enum AddMenuState {
     },
     /// Local: pick runtime (sglang/vllm)
     SelectRuntime,
-    /// Local: pick connection mode (http/grpc)
+    /// Local: pick connection (http/grpc)
     SelectConnection {
         runtime: LocalRuntime,
     },
     /// Local: pick model preset
     SelectModel {
         runtime: LocalRuntime,
-        connection: LocalConnection,
-    },
-    /// Local: enter worker URL
-    EnterLocalUrl {
-        runtime: LocalRuntime,
-        connection: LocalConnection,
-        model: LocalModelPreset,
-        input: String,
+        grpc: bool,
     },
     /// Custom: enter URL
     EnterCustomUrl {
@@ -115,7 +108,6 @@ impl AddMenuState {
     pub fn get_input(&self) -> Option<String> {
         match self {
             Self::EnterApiKey { input, .. }
-            | Self::EnterLocalUrl { input, .. }
             | Self::EnterCustomUrl { input } => Some(input.clone()),
             _ => None,
         }
@@ -142,19 +134,52 @@ impl LocalRuntime {
             Self::Vllm => openai_protocol::worker::RuntimeType::Vllm,
         }
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalConnection {
-    Http,
-    Grpc,
-}
-
-impl LocalConnection {
-    pub fn label(&self) -> &'static str {
+    /// Build the command and args to launch a worker.
+    pub fn launch_args(&self, model_id: &str, tp: u32, port: u16, grpc: bool) -> (String, Vec<String>) {
         match self {
-            Self::Http => "http",
-            Self::Grpc => "grpc",
+            Self::Sglang => {
+                let mut args = vec![
+                    "-m".to_string(),
+                    "sglang.launch_server".to_string(),
+                    "--model-path".to_string(),
+                    model_id.to_string(),
+                    "--tp-size".to_string(),
+                    tp.to_string(),
+                    "--port".to_string(),
+                    port.to_string(),
+                    "--host".to_string(),
+                    "0.0.0.0".to_string(),
+                ];
+                if grpc {
+                    args.push("--grpc-mode".to_string());
+                }
+                ("python3".to_string(), args)
+            }
+            Self::Vllm => {
+                let entrypoint = if grpc {
+                    "vllm.entrypoints.grpc_server"
+                } else {
+                    "vllm.entrypoints.openai.api_server"
+                };
+                let args = vec![
+                    "-m".to_string(),
+                    entrypoint.to_string(),
+                    "--model".to_string(),
+                    model_id.to_string(),
+                    "--tensor-parallel-size".to_string(),
+                    tp.to_string(),
+                    "--port".to_string(),
+                    port.to_string(),
+                    "--host".to_string(),
+                    "0.0.0.0".to_string(),
+                    "--max-model-len".to_string(),
+                    "16384".to_string(),
+                    "--gpu-memory-utilization".to_string(),
+                    "0.9".to_string(),
+                ];
+                ("python3".to_string(), args)
+            }
         }
     }
 }

@@ -127,8 +127,8 @@ pub fn render_add_menu(f: &mut Frame, app: &App) {
         }
         AddMenuState::SelectConnection { runtime } => {
             render_menu(f, &format!(" {} — Connection ", runtime.label()), &[
-                ("1", "HTTP", "standard REST API"),
-                ("2", "gRPC", "high-performance binary protocol"),
+                ("1", "HTTP", "OpenAI-compatible REST"),
+                ("2", "gRPC", "high-performance binary"),
             ]);
         }
         AddMenuState::SelectModel { runtime, .. } => {
@@ -147,10 +147,6 @@ pub fn render_add_menu(f: &mut Frame, app: &App) {
             let title = format!(" {} — Model ", runtime.label());
             let refs: Vec<(&str, &str, &str)> = items.iter().map(|(n, l, d)| (*n, l.as_str(), d.as_str())).collect();
             render_menu(f, &title, &refs);
-        }
-        AddMenuState::EnterLocalUrl { runtime, model, .. } => {
-            let title = format!(" {} — {} ", runtime.label(), model.label());
-            render_text_input(f, &title, "Worker URL:", &state.get_input().unwrap_or_default(), false);
         }
         AddMenuState::EnterCustomUrl { input } => {
             render_text_input(f, " Custom Worker ", "URL:", input, false);

@@ -49,6 +49,9 @@ pub struct App {
     pub log_scroll: u16,
     pub log_auto_scroll: bool,
 
+    // Spawned local worker processes
+    pub worker_children: Vec<(String, tokio::process::Child)>, // (description, child)
+
     status_clear_at: Option<std::time::Instant>,
 }
 
@@ -98,6 +101,7 @@ impl App {
             log_entries: VecDeque::with_capacity(MAX_LOG_ENTRIES),
             log_scroll: u16::MAX,
             log_auto_scroll: true,
+            worker_children: Vec::new(),
             status_clear_at: None,
         }
     }
@@ -757,7 +761,7 @@ impl App {
     }
 
     async fn handle_add_menu_key(&mut self, key: KeyEvent) {
-        use crate::types::{LocalConnection, LocalModelPreset, LocalRuntime};
+        use crate::types::{LocalModelPreset, LocalRuntime};
 
         let state_clone = self.add_menu_state.clone();
         match &state_clone {
@@ -824,14 +828,14 @@ impl App {
             Some(AddMenuState::SelectConnection { runtime }) => match key.code {
                 KeyCode::Esc => self.add_menu_state = Some(AddMenuState::SelectRuntime),
                 KeyCode::Char('1') => self.add_menu_state = Some(AddMenuState::SelectModel {
-                    runtime: *runtime, connection: LocalConnection::Http,
+                    runtime: *runtime, grpc: false,
                 }),
                 KeyCode::Char('2') => self.add_menu_state = Some(AddMenuState::SelectModel {
-                    runtime: *runtime, connection: LocalConnection::Grpc,
+                    runtime: *runtime, grpc: true,
                 }),
                 _ => {}
             },
-            Some(AddMenuState::SelectModel { runtime, connection }) => {
+            Some(AddMenuState::SelectModel { runtime, grpc }) => {
                 let presets = LocalModelPreset::all();
                 let custom_idx = presets.len() + 1;
                 match key.code {
@@ -842,60 +846,18 @@ impl App {
                         let idx = c.to_digit(10).unwrap_or(0) as usize;
                         if idx >= 1 && idx <= presets.len() {
                             let model = presets[idx - 1].clone();
-                            self.add_menu_state = Some(AddMenuState::EnterLocalUrl {
-                                runtime: *runtime,
-                                connection: *connection,
-                                model,
-                                input: "http://localhost:8000".to_string(),
-                            });
+                            let runtime = *runtime;
+                            let grpc = *grpc;
+                            self.add_menu_state = None;
+                            self.spawn_local_worker(runtime, model, grpc).await;
                         } else if idx == custom_idx {
-                            // Custom model — for now use command mode
                             self.add_menu_state = None;
                             self.input_mode = InputMode::Command;
-                            self.input_buffer = "add http://localhost:8000 --runtime ".to_string();
-                            self.input_buffer.push_str(runtime.label());
+                            self.input_buffer = format!("add http://localhost:8000 --runtime {}", runtime.label());
                         }
                     }
                     _ => {}
                 }
-            },
-            Some(AddMenuState::EnterLocalUrl { runtime, connection, model, input }) => match key.code {
-                KeyCode::Esc => self.add_menu_state = Some(AddMenuState::SelectModel {
-                    runtime: *runtime, connection: *connection,
-                }),
-                KeyCode::Enter => {
-                    let url = input.clone();
-                    let runtime = *runtime;
-                    let connection = *connection;
-                    let model = model.clone();
-                    self.add_menu_state = None;
-
-                    let mut spec = WorkerSpec::new(url);
-                    spec.runtime_type = runtime.runtime_type();
-                    spec.connection_mode = match connection {
-                        LocalConnection::Http => openai_protocol::worker::ConnectionMode::Http,
-                        LocalConnection::Grpc => openai_protocol::worker::ConnectionMode::Grpc,
-                    };
-                    // Note: model and TP are set on the worker backend, not in the spec
-                    match self.client.add_worker(&spec).await {
-                        Ok(_) => self.set_status(format!(
-                            "Added {} {} worker ({})",
-                            runtime.label(), connection.label(), model.label()
-                        )),
-                        Err(e) => self.set_status(format!("Error: {e}")),
-                    }
-                }
-                KeyCode::Backspace => {
-                    if let Some(AddMenuState::EnterLocalUrl { ref mut input, .. }) = self.add_menu_state {
-                        input.pop();
-                    }
-                }
-                KeyCode::Char(c) => {
-                    if let Some(AddMenuState::EnterLocalUrl { ref mut input, .. }) = self.add_menu_state {
-                        input.push(c);
-                    }
-                }
-                _ => {}
             },
             Some(AddMenuState::EnterCustomUrl { input }) => match key.code {
                 KeyCode::Esc => self.add_menu_state = Some(AddMenuState::SelectCategory),
@@ -945,6 +907,116 @@ impl App {
         self.status_clear_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
     }
 
+    async fn spawn_local_worker(
+        &mut self,
+        runtime: crate::types::LocalRuntime,
+        model: crate::types::LocalModelPreset,
+        grpc: bool,
+    ) {
+        // Find an available port
+        let port = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener.local_addr().unwrap().port(),
+            Err(e) => {
+                self.set_status(format!("Failed to find available port: {e}"));
+                return;
+            }
+        };
+
+        // Check GPU availability
+        let gpu_count = check_gpu_count().await;
+        let tp = model.tp();
+        if gpu_count == 0 {
+            self.set_status("No GPUs available (nvidia-smi not found or no GPUs detected)".to_string());
+            return;
+        }
+        if tp > gpu_count {
+            self.set_status(format!(
+                "Not enough GPUs: model requires TP={tp} but only {gpu_count} GPU(s) available"
+            ));
+            return;
+        }
+
+        let model_id = model.model_id().to_string();
+        let conn_label = if grpc { "grpc" } else { "http" };
+        let (cmd, args) = runtime.launch_args(&model_id, tp, port, grpc);
+        let desc = format!("{} {} {} (port {port})", runtime.label(), conn_label, model.label());
+
+        self.add_log(LogLevel::Info, &format!("Starting {desc}..."));
+        self.add_log(LogLevel::Info, &format!("Command: {cmd} {}", args.join(" ")));
+
+        let log_path = format!("/tmp/smg-worker-{port}.log");
+        let log_file = match std::fs::File::create(&log_path) {
+            Ok(f) => f,
+            Err(e) => {
+                self.set_status(format!("Failed to create log file: {e}"));
+                return;
+            }
+        };
+        let log_file2 = log_file.try_clone().unwrap();
+
+        match tokio::process::Command::new(&cmd)
+            .args(&args)
+            .stdout(std::process::Stdio::from(log_file))
+            .stderr(std::process::Stdio::from(log_file2))
+            .spawn()
+        {
+            Ok(child) => {
+                self.add_log(
+                    LogLevel::Info,
+                    &format!("Worker started (pid {}, log: {log_path})", child.id().unwrap_or(0)),
+                );
+                self.worker_children.push((desc.clone(), child));
+
+                // Register with gateway in background
+                let url = if grpc {
+                    format!("grpc://127.0.0.1:{port}")
+                } else {
+                    format!("http://127.0.0.1:{port}")
+                };
+                let runtime_type = runtime.runtime_type();
+                let connection_mode = if grpc {
+                    openai_protocol::worker::ConnectionMode::Grpc
+                } else {
+                    openai_protocol::worker::ConnectionMode::Http
+                };
+                let desc2 = desc.clone();
+                let client2 = self.client.clone();
+                let health_url = format!("http://127.0.0.1:{port}/health");
+                let url2 = url.clone();
+
+                tokio::spawn(async move {
+                    // Poll worker health (up to 5 min for model loading)
+                    let deadline =
+                        tokio::time::Instant::now() + tokio::time::Duration::from_secs(300);
+                    loop {
+                        if tokio::time::Instant::now() >= deadline {
+                            tracing::warn!("Worker {desc2} did not become ready in 300s");
+                            return;
+                        }
+                        if reqwest::get(&health_url).await.is_ok() {
+                            break;
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    }
+
+                    // Register with gateway
+                    let mut spec = WorkerSpec::new(&url2);
+                    spec.runtime_type = runtime_type;
+                    spec.connection_mode = connection_mode;
+                    match client2.add_worker(&spec).await {
+                        Ok(_) => tracing::info!("Registered worker {url2} with gateway"),
+                        Err(e) => tracing::error!("Failed to register worker {url2}: {e}"),
+                    }
+                });
+
+                self.set_status(format!("Launching {desc} — waiting for readiness..."));
+            }
+            Err(e) => {
+                self.set_status(format!("Failed to start worker: {e}"));
+            }
+        }
+    }
+
     fn add_log(&mut self, level: LogLevel, message: &str) {
         if self.log_entries.len() >= MAX_LOG_ENTRIES {
             self.log_entries.pop_front();
@@ -967,6 +1039,23 @@ impl App {
                 self.selected_index = self.selected_index.min(count - 1);
             }
         }
+    }
+}
+
+/// Check how many GPUs are available via nvidia-smi. Returns 0 if not available.
+async fn check_gpu_count() -> u32 {
+    let output = tokio::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=index", "--format=csv,noheader"])
+        .output()
+        .await;
+    match output {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .count() as u32
+        }
+        _ => 0,
     }
 }
 

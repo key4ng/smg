@@ -228,54 +228,6 @@ fn render_card(
     }
 }
 
-fn render_card_colored(
-    f: &mut Frame,
-    area: Rect,
-    bg: Style,
-    label: &str,
-    value: &str,
-    value_color: ratatui::style::Color,
-    detail: Option<(&str, ratatui::style::Color)>,
-) {
-    let rows = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .split(area);
-
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(label, theme::label())))
-            .alignment(Alignment::Center)
-            .style(bg),
-        rows[0],
-    );
-
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            value,
-            Style::default()
-                .fg(value_color)
-                .add_modifier(Modifier::BOLD),
-        )))
-        .alignment(Alignment::Center)
-        .style(bg),
-        rows[1],
-    );
-
-    if let Some((text, color)) = detail {
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                text,
-                Style::default().fg(color),
-            )))
-            .alignment(Alignment::Center)
-            .style(bg),
-            rows[2],
-        );
-    }
-}
-
 fn render_load_card(
     f: &mut Frame,
     area: Rect,

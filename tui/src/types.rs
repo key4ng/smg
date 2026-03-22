@@ -73,13 +73,124 @@ pub enum InputMode {
 /// State machine for the Add Worker menu flow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AddMenuState {
-    /// Selecting provider type (1-7 menu).
+    /// Top-level: 1. External  2. Local  3. Custom URL
+    SelectCategory,
+    /// External: pick provider
     SelectProvider,
-    /// Typing API key for external provider.
+    /// External: enter API key
     EnterApiKey {
         provider: ProviderPreset,
         input: String,
     },
+    /// Local: pick runtime (sglang/vllm)
+    SelectRuntime,
+    /// Local: pick connection mode (http/grpc)
+    SelectConnection {
+        runtime: LocalRuntime,
+    },
+    /// Local: pick model preset
+    SelectModel {
+        runtime: LocalRuntime,
+        connection: LocalConnection,
+    },
+    /// Local: enter worker URL
+    EnterLocalUrl {
+        runtime: LocalRuntime,
+        connection: LocalConnection,
+        model: LocalModelPreset,
+        input: String,
+    },
+    /// Custom: enter URL
+    EnterCustomUrl {
+        input: String,
+    },
+}
+
+impl AddMenuState {
+    pub fn get_input(&self) -> Option<String> {
+        match self {
+            Self::EnterApiKey { input, .. }
+            | Self::EnterLocalUrl { input, .. }
+            | Self::EnterCustomUrl { input } => Some(input.clone()),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalRuntime {
+    Sglang,
+    Vllm,
+}
+
+impl LocalRuntime {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Sglang => "sglang",
+            Self::Vllm => "vllm",
+        }
+    }
+
+    pub fn runtime_type(&self) -> openai_protocol::worker::RuntimeType {
+        match self {
+            Self::Sglang => openai_protocol::worker::RuntimeType::Sglang,
+            Self::Vllm => openai_protocol::worker::RuntimeType::Vllm,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalConnection {
+    Http,
+    Grpc,
+}
+
+impl LocalConnection {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Grpc => "grpc",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalModelPreset {
+    Preset { name: &'static str, model_id: &'static str, tp: u32 },
+    Custom { model_id: String, tp: u32 },
+}
+
+impl LocalModelPreset {
+    pub fn all() -> Vec<LocalModelPreset> {
+        vec![
+            Self::Preset { name: "Llama-3.2-1B", model_id: "meta-llama/Llama-3.2-1B-Instruct", tp: 1 },
+            Self::Preset { name: "Llama-3.1-8B", model_id: "meta-llama/Llama-3.1-8B-Instruct", tp: 1 },
+            Self::Preset { name: "Qwen2.5-7B", model_id: "Qwen/Qwen2.5-7B-Instruct", tp: 1 },
+            Self::Preset { name: "Qwen2.5-14B", model_id: "Qwen/Qwen2.5-14B-Instruct", tp: 2 },
+            Self::Preset { name: "DeepSeek-R1-7B", model_id: "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", tp: 1 },
+            Self::Preset { name: "Mistral-7B", model_id: "mistralai/Mistral-7B-Instruct-v0.3", tp: 1 },
+        ]
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            Self::Preset { name, tp, .. } => format!("{name} (TP={tp})"),
+            Self::Custom { model_id, tp } => format!("{model_id} (TP={tp})"),
+        }
+    }
+
+    pub fn model_id(&self) -> &str {
+        match self {
+            Self::Preset { model_id, .. } => model_id,
+            Self::Custom { model_id, .. } => model_id,
+        }
+    }
+
+    pub fn tp(&self) -> u32 {
+        match self {
+            Self::Preset { tp, .. } | Self::Custom { tp, .. } => *tp,
+        }
+    }
 }
 
 /// Preset provider for quick-add.

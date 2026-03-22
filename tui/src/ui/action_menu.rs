@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::{
     app::App,
-    types::{ActionMenuItem, AddMenuState},
+    types::ActionMenuItem,
 };
 
 use super::theme;
@@ -94,21 +94,73 @@ pub fn render_action_menu(f: &mut Frame, app: &App) {
 
 /// Render the add worker menu overlay.
 pub fn render_add_menu(f: &mut Frame, app: &App) {
+    use crate::types::{AddMenuState, LocalModelPreset};
+
     let Some(ref state) = app.add_menu_state else {
         return;
     };
 
     match state {
-        AddMenuState::SelectProvider => render_provider_select(f),
+        AddMenuState::SelectCategory => {
+            render_menu(f, " Add Worker ", &[
+                ("1", "External Provider", "OpenAI, Anthropic, xAI, Gemini"),
+                ("2", "Local Backend", "sglang, vllm"),
+                ("3", "Custom URL", "manual configuration"),
+            ]);
+        }
+        AddMenuState::SelectProvider => {
+            render_menu(f, " External Provider ", &[
+                ("1", "OpenAI", "https://api.openai.com"),
+                ("2", "Anthropic", "https://api.anthropic.com"),
+                ("3", "xAI (Grok)", "https://api.x.ai"),
+                ("4", "Gemini", "https://generativelanguage.googleapis.com"),
+            ]);
+        }
         AddMenuState::EnterApiKey { provider, input } => {
-            render_api_key_input(f, provider.label(), input);
+            render_text_input(f, &format!(" Add {} ", provider.label()), "API Key:", input, true);
+        }
+        AddMenuState::SelectRuntime => {
+            render_menu(f, " Local Backend ", &[
+                ("1", "SGLang", "high-performance serving"),
+                ("2", "vLLM", "versatile serving"),
+            ]);
+        }
+        AddMenuState::SelectConnection { runtime } => {
+            render_menu(f, &format!(" {} — Connection ", runtime.label()), &[
+                ("1", "HTTP", "standard REST API"),
+                ("2", "gRPC", "high-performance binary protocol"),
+            ]);
+        }
+        AddMenuState::SelectModel { runtime, .. } => {
+            let presets = LocalModelPreset::all();
+            let mut items: Vec<(&str, String, String)> = presets
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let num = Box::leak(format!("{}", i + 1).into_boxed_str()) as &str;
+                    (num, p.label(), format!("TP={}", p.tp()))
+                })
+                .collect();
+            let custom_num = Box::leak(format!("{}", presets.len() + 1).into_boxed_str()) as &str;
+            items.push((custom_num, "Custom model...".to_string(), "enter model ID + TP".to_string()));
+
+            let title = format!(" {} — Model ", runtime.label());
+            let refs: Vec<(&str, &str, &str)> = items.iter().map(|(n, l, d)| (*n, l.as_str(), d.as_str())).collect();
+            render_menu(f, &title, &refs);
+        }
+        AddMenuState::EnterLocalUrl { runtime, model, .. } => {
+            let title = format!(" {} — {} ", runtime.label(), model.label());
+            render_text_input(f, &title, "Worker URL:", &state.get_input().unwrap_or_default(), false);
+        }
+        AddMenuState::EnterCustomUrl { input } => {
+            render_text_input(f, " Custom Worker ", "URL:", input, false);
         }
     }
 }
 
-fn render_provider_select(f: &mut Frame) {
-    let width = 44u16;
-    let height = 14u16;
+fn render_menu(f: &mut Frame, title: &str, items: &[(&str, &str, &str)]) {
+    let height = items.len() as u16 * 2 + 5;
+    let width = 50u16;
 
     let area = f.area();
     let [_, vert, _] = Layout::vertical([
@@ -126,7 +178,7 @@ fn render_provider_select(f: &mut Frame) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Add Worker ")
+        .title(title)
         .title_style(theme::title())
         .border_style(Style::default().fg(theme::BORDER))
         .style(Style::default().bg(theme::PANEL_BG));
@@ -134,49 +186,25 @@ fn render_provider_select(f: &mut Frame) {
     let inner = block.inner(popup);
     f.render_widget(block, popup);
 
-    let lines = vec![
-        Line::from(Span::styled("Select provider:", Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD))),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(" [1] ", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
-            Span::styled("OpenAI", Style::default().fg(theme::TEXT)),
-        ]),
-        Line::from(vec![
-            Span::styled(" [2] ", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
-            Span::styled("Anthropic", Style::default().fg(theme::TEXT)),
-        ]),
-        Line::from(vec![
-            Span::styled(" [3] ", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
-            Span::styled("xAI (Grok)", Style::default().fg(theme::TEXT)),
-        ]),
-        Line::from(vec![
-            Span::styled(" [4] ", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
-            Span::styled("Gemini", Style::default().fg(theme::TEXT)),
-        ]),
-        Line::from(vec![
-            Span::styled(" [5] ", Style::default().fg(theme::TEXT_MUTED)),
-            Span::styled("Local SGLang  ", Style::default().fg(theme::TEXT_MUTED)),
-            Span::styled("(coming soon)", Style::default().fg(theme::TEXT_MUTED).add_modifier(Modifier::ITALIC)),
-        ]),
-        Line::from(vec![
-            Span::styled(" [6] ", Style::default().fg(theme::TEXT_MUTED)),
-            Span::styled("Local vLLM    ", Style::default().fg(theme::TEXT_MUTED)),
-            Span::styled("(coming soon)", Style::default().fg(theme::TEXT_MUTED).add_modifier(Modifier::ITALIC)),
-        ]),
-        Line::from(vec![
-            Span::styled(" [7] ", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
-            Span::styled("Custom URL", Style::default().fg(theme::TEXT)),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled("Esc to cancel", Style::default().fg(theme::TEXT_MUTED))),
-    ];
+    let mut lines = Vec::new();
+    for (num, label, desc) in items {
+        lines.push(Line::from(vec![
+            Span::styled(format!(" [{num}] "), Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(*label, Style::default().fg(theme::TEXT)),
+            Span::styled(format!("  {desc}"), Style::default().fg(theme::TEXT_MUTED)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Esc to cancel",
+        Style::default().fg(theme::TEXT_MUTED),
+    )));
 
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-    f.render_widget(paragraph, inner);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-fn render_api_key_input(f: &mut Frame, provider_label: &str, input: &str) {
-    let width = 50u16;
+fn render_text_input(f: &mut Frame, title: &str, label: &str, input: &str, masked: bool) {
+    let width = 55u16;
     let height = 8u16;
 
     let area = f.area();
@@ -193,7 +221,6 @@ fn render_api_key_input(f: &mut Frame, provider_label: &str, input: &str) {
 
     f.render_widget(Clear, popup);
 
-    let title = format!(" Add {} Worker ", provider_label);
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
@@ -204,22 +231,27 @@ fn render_api_key_input(f: &mut Frame, provider_label: &str, input: &str) {
     let inner = block.inner(popup);
     f.render_widget(block, popup);
 
-    // Masked API key display
-    let masked: String = "*".repeat(input.len());
     let display = if input.is_empty() {
-        Span::styled("Enter API key...", Style::default().fg(theme::TEXT_MUTED))
+        Span::styled("Type here...", Style::default().fg(theme::TEXT_MUTED))
+    } else if masked {
+        Span::styled("*".repeat(input.len()), Style::default().fg(theme::TEXT))
     } else {
-        Span::styled(masked, Style::default().fg(theme::TEXT))
+        Span::styled(input, Style::default().fg(theme::TEXT))
     };
 
     let lines = vec![
-        Line::from(Span::styled("API Key:", Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            label,
+            Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
-        Line::from(display),
+        Line::from(vec![display, Span::styled("▊", Style::default().fg(theme::ACCENT))]),
         Line::from(""),
-        Line::from(Span::styled("Enter to confirm  Esc to cancel", Style::default().fg(theme::TEXT_MUTED))),
+        Line::from(Span::styled(
+            " Enter to confirm  Esc to cancel",
+            Style::default().fg(theme::TEXT_MUTED),
+        )),
     ];
 
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-    f.render_widget(paragraph, inner);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }

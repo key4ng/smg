@@ -268,7 +268,7 @@ impl App {
             }
             KeyCode::Char('a') => {
                 if self.view == View::Workers {
-                    self.add_menu_state = Some(AddMenuState::SelectProvider);
+                    self.add_menu_state = Some(AddMenuState::SelectCategory);
                 }
             }
 
@@ -699,42 +699,35 @@ impl App {
     }
 
     async fn handle_add_menu_key(&mut self, key: KeyEvent) {
-        match &self.add_menu_state.clone() {
+        use crate::types::{LocalConnection, LocalModelPreset, LocalRuntime};
+
+        let state_clone = self.add_menu_state.clone();
+        match &state_clone {
+            Some(AddMenuState::SelectCategory) => match key.code {
+                KeyCode::Esc => self.add_menu_state = None,
+                KeyCode::Char('1') => self.add_menu_state = Some(AddMenuState::SelectProvider),
+                KeyCode::Char('2') => self.add_menu_state = Some(AddMenuState::SelectRuntime),
+                KeyCode::Char('3') => self.add_menu_state = Some(AddMenuState::EnterCustomUrl { input: String::new() }),
+                _ => {}
+            },
             Some(AddMenuState::SelectProvider) => match key.code {
-                KeyCode::Esc => { self.add_menu_state = None; }
-                KeyCode::Char('1') => {
-                    self.add_menu_state = Some(AddMenuState::EnterApiKey {
-                        provider: ProviderPreset::OpenAI, input: String::new(),
-                    });
-                }
-                KeyCode::Char('2') => {
-                    self.add_menu_state = Some(AddMenuState::EnterApiKey {
-                        provider: ProviderPreset::Anthropic, input: String::new(),
-                    });
-                }
-                KeyCode::Char('3') => {
-                    self.add_menu_state = Some(AddMenuState::EnterApiKey {
-                        provider: ProviderPreset::Xai, input: String::new(),
-                    });
-                }
-                KeyCode::Char('4') => {
-                    self.add_menu_state = Some(AddMenuState::EnterApiKey {
-                        provider: ProviderPreset::Gemini, input: String::new(),
-                    });
-                }
-                KeyCode::Char('5') | KeyCode::Char('6') => {
-                    self.add_menu_state = None;
-                    self.set_status("Local backend launching coming in Phase 2".to_string());
-                }
-                KeyCode::Char('7') => {
-                    self.add_menu_state = None;
-                    self.input_mode = InputMode::Command;
-                    self.input_buffer = "add ".to_string();
-                }
+                KeyCode::Esc => self.add_menu_state = Some(AddMenuState::SelectCategory),
+                KeyCode::Char('1') => self.add_menu_state = Some(AddMenuState::EnterApiKey {
+                    provider: ProviderPreset::OpenAI, input: String::new(),
+                }),
+                KeyCode::Char('2') => self.add_menu_state = Some(AddMenuState::EnterApiKey {
+                    provider: ProviderPreset::Anthropic, input: String::new(),
+                }),
+                KeyCode::Char('3') => self.add_menu_state = Some(AddMenuState::EnterApiKey {
+                    provider: ProviderPreset::Xai, input: String::new(),
+                }),
+                KeyCode::Char('4') => self.add_menu_state = Some(AddMenuState::EnterApiKey {
+                    provider: ProviderPreset::Gemini, input: String::new(),
+                }),
                 _ => {}
             },
             Some(AddMenuState::EnterApiKey { provider, input }) => match key.code {
-                KeyCode::Esc => { self.add_menu_state = None; }
+                KeyCode::Esc => self.add_menu_state = Some(AddMenuState::SelectProvider),
                 KeyCode::Enter => {
                     let provider = *provider;
                     let api_key = input.clone();
@@ -755,6 +748,115 @@ impl App {
                 }
                 KeyCode::Char(c) => {
                     if let Some(AddMenuState::EnterApiKey { ref mut input, .. }) = self.add_menu_state {
+                        input.push(c);
+                    }
+                }
+                _ => {}
+            },
+            Some(AddMenuState::SelectRuntime) => match key.code {
+                KeyCode::Esc => self.add_menu_state = Some(AddMenuState::SelectCategory),
+                KeyCode::Char('1') => self.add_menu_state = Some(AddMenuState::SelectConnection {
+                    runtime: LocalRuntime::Sglang,
+                }),
+                KeyCode::Char('2') => self.add_menu_state = Some(AddMenuState::SelectConnection {
+                    runtime: LocalRuntime::Vllm,
+                }),
+                _ => {}
+            },
+            Some(AddMenuState::SelectConnection { runtime }) => match key.code {
+                KeyCode::Esc => self.add_menu_state = Some(AddMenuState::SelectRuntime),
+                KeyCode::Char('1') => self.add_menu_state = Some(AddMenuState::SelectModel {
+                    runtime: *runtime, connection: LocalConnection::Http,
+                }),
+                KeyCode::Char('2') => self.add_menu_state = Some(AddMenuState::SelectModel {
+                    runtime: *runtime, connection: LocalConnection::Grpc,
+                }),
+                _ => {}
+            },
+            Some(AddMenuState::SelectModel { runtime, connection }) => {
+                let presets = LocalModelPreset::all();
+                let custom_idx = presets.len() + 1;
+                match key.code {
+                    KeyCode::Esc => self.add_menu_state = Some(AddMenuState::SelectConnection {
+                        runtime: *runtime,
+                    }),
+                    KeyCode::Char(c) if c.is_ascii_digit() => {
+                        let idx = c.to_digit(10).unwrap_or(0) as usize;
+                        if idx >= 1 && idx <= presets.len() {
+                            let model = presets[idx - 1].clone();
+                            self.add_menu_state = Some(AddMenuState::EnterLocalUrl {
+                                runtime: *runtime,
+                                connection: *connection,
+                                model,
+                                input: "http://localhost:8000".to_string(),
+                            });
+                        } else if idx == custom_idx {
+                            // Custom model — for now use command mode
+                            self.add_menu_state = None;
+                            self.input_mode = InputMode::Command;
+                            self.input_buffer = "add http://localhost:8000 --runtime ".to_string();
+                            self.input_buffer.push_str(runtime.label());
+                        }
+                    }
+                    _ => {}
+                }
+            },
+            Some(AddMenuState::EnterLocalUrl { runtime, connection, model, input }) => match key.code {
+                KeyCode::Esc => self.add_menu_state = Some(AddMenuState::SelectModel {
+                    runtime: *runtime, connection: *connection,
+                }),
+                KeyCode::Enter => {
+                    let url = input.clone();
+                    let runtime = *runtime;
+                    let connection = *connection;
+                    let model = model.clone();
+                    self.add_menu_state = None;
+
+                    let mut spec = WorkerSpec::new(url);
+                    spec.runtime_type = runtime.runtime_type();
+                    spec.connection_mode = match connection {
+                        LocalConnection::Http => openai_protocol::worker::ConnectionMode::Http,
+                        LocalConnection::Grpc => openai_protocol::worker::ConnectionMode::Grpc,
+                    };
+                    // Note: model and TP are set on the worker backend, not in the spec
+                    match self.client.add_worker(&spec).await {
+                        Ok(_) => self.set_status(format!(
+                            "Added {} {} worker ({})",
+                            runtime.label(), connection.label(), model.label()
+                        )),
+                        Err(e) => self.set_status(format!("Error: {e}")),
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(AddMenuState::EnterLocalUrl { ref mut input, .. }) = self.add_menu_state {
+                        input.pop();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Some(AddMenuState::EnterLocalUrl { ref mut input, .. }) = self.add_menu_state {
+                        input.push(c);
+                    }
+                }
+                _ => {}
+            },
+            Some(AddMenuState::EnterCustomUrl { input }) => match key.code {
+                KeyCode::Esc => self.add_menu_state = Some(AddMenuState::SelectCategory),
+                KeyCode::Enter => {
+                    let url = input.clone();
+                    self.add_menu_state = None;
+                    let spec = WorkerSpec::new(url);
+                    match self.client.add_worker(&spec).await {
+                        Ok(_) => self.set_status("Added custom worker".to_string()),
+                        Err(e) => self.set_status(format!("Error: {e}")),
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(AddMenuState::EnterCustomUrl { ref mut input }) = self.add_menu_state {
+                        input.pop();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Some(AddMenuState::EnterCustomUrl { ref mut input }) = self.add_menu_state {
                         input.push(c);
                     }
                 }

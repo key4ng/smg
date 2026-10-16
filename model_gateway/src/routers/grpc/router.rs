@@ -371,10 +371,9 @@ impl GrpcRouter {
         // Zero or several served models keep the current behavior:
         // model_not_found. An untagged worker (no model card, no
         // `model_id` label) registers under the wildcard itself
-        // (`Worker::model_id`'s fallback), so it is filtered out here --
-        // otherwise it would either mask a real single-model fleet behind a
-        // spurious second entry, or, in an untagged-only fleet, make the
-        // default resolve the wildcard to itself and 500 instead of 404ing.
+        // (`Worker::model_id`'s fallback), so it is filtered out here:
+        // otherwise it would mask a real single-model fleet behind a
+        // spurious second entry.
         let resolved_model_id: Cow<'_, str> = if model_id == UNKNOWN_MODEL_ID {
             let served_models: Vec<String> = self
                 .worker_registry

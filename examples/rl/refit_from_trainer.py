@@ -19,8 +19,8 @@ The sequence, in order:
     destroy_weights_update_group     fan-out
     continue_generation              fan-out (`smg.rl.paused`)
 
-then one `/generate` through SMG to confirm an engine reports the new
-`meta_info.weight_version`.
+then `model_info` on every refitted worker to confirm each reports the new
+weight version, and one `/generate` through SMG as a smoke test.
 
 Unlike the other examples this one runs where a trainer runs: it needs `torch`
 built with CUDA and `transformers`, and it loads --model-path onto --device to
@@ -281,6 +281,13 @@ def _init_groups(
             thread.join(timeout)
 
     problems = [f"{wid}: {err}" for wid, err in sorted(errors.items())]
+    # A join that timed out leaves a call in flight: that worker is in neither
+    # map, and a count that skipped it would read as success.
+    problems += [
+        f"{w.id}: no response within --timeout"
+        for w in targets
+        if w.id not in results and w.id not in errors
+    ]
     problems += [
         f"{wid}: HTTP {r.status} {json.dumps(r.body)[:200]}"
         for wid, r in sorted(results.items())
@@ -440,11 +447,40 @@ def _generate_weight_version(
     raise RuntimeError(f"/generate did not answer within {timeout:g}s: {last}") from last
 
 
-def _refit(rl: RL, args: argparse.Namespace) -> tuple[str, list[str]]:
+def _verify_weight_versions(
+    rl: RL, targets: list[Worker], expected: str, timeout: float
+) -> list[str]:
+    """Each refitted worker's own report of its weight version.
+
+    `/generate` goes through model routing, so it can land on a worker outside
+    `--selector` that serves the same model, and it asks one worker, not every
+    one that was refitted. The per-worker `model_info` call is pinned to the
+    worker and answers with the version its engine serves now.
+    """
+    problems: list[str] = []
+    for worker in targets:
+        try:
+            result = rl.call(worker.id, "model_info", method="GET", timeout=timeout)
+        except Exception as e:  # reported with the rest, so every worker is named
+            problems.append(f"{worker.id}: model_info failed: {e}")
+            continue
+        if _call_failed(result):
+            problems.append(f"{worker.id}: model_info HTTP {result.status}")
+            continue
+        body = result.body if isinstance(result.body, dict) else {}
+        got = str(body.get("weight_version"))
+        print(f"  {worker.id}: weight_version={got}")
+        if got != expected:
+            problems.append(f"{worker.id}: reports weight_version={got}, expected {expected}")
+    return problems
+
+
+def _refit(rl: RL, args: argparse.Namespace) -> tuple[str, list[Worker], list[str]]:
     """Pause, refit over NCCL, resume.
 
-    Returns the model name to generate with and the teardown problems, which
-    the caller turns into a non-zero exit even when the refit itself worked.
+    Returns the model name to generate with, the workers that were refitted,
+    and the teardown problems, which the caller turns into a non-zero exit even
+    when the refit itself worked.
     """
     device = torch.device(args.device)
     torch.cuda.set_device(device)
@@ -458,6 +494,8 @@ def _refit(rl: RL, args: argparse.Namespace) -> tuple[str, list[str]]:
     problems: list[str] = []
     with paused(rl, args.selector) as pause:
         _print_fanout("pause_generation", pause)
+        if not pause.results:
+            raise RuntimeError(f"--selector {args.selector!r} matched no workers")
         unknown = sorted(set(pause.results) - set(by_id))
         if unknown:
             raise RuntimeError(
@@ -466,9 +504,10 @@ def _refit(rl: RL, args: argparse.Namespace) -> tuple[str, list[str]]:
             )
         targets = [by_id[wid] for wid in sorted(pause.results)]
         expected = {w.id for w in targets}
-        # A TokenSpeed engine launched without an explicit parallelism flag
-        # reports no tp_size, and a wrong tp_size lays the ranks out wrong and
-        # deadlocks the group. Assume 1 unless --tp-size says otherwise.
+        # A TokenSpeed engine can report no tp_size at all: the newest builds
+        # nest their parallelism under mapping.*, which discovery does not read
+        # yet. A wrong tp_size lays the ranks out wrong and deadlocks the
+        # group, so assume 1 unless --tp-size says otherwise.
         fallback = args.tp_size or 1
         for worker in targets:
             if worker.tp_size is None:
@@ -527,7 +566,7 @@ def _refit(rl: RL, args: argparse.Namespace) -> tuple[str, list[str]]:
             for problem in problems:
                 print(f"WARN {problem}", file=sys.stderr)
     print("continue_generation ... resumed")
-    return args.model or (targets[0].model_id if targets else ""), problems
+    return args.model or (targets[0].model_id if targets else ""), targets, problems
 
 
 def main() -> int:
@@ -589,22 +628,25 @@ def main() -> int:
 
     rl = RL(args.smg, api_key=args.api_key, timeout=args.timeout)
     try:
-        model, problems = _refit(rl, args)
+        model, targets, problems = _refit(rl, args)
     except Exception:
         traceback.print_exc()
         print("refit failed", file=sys.stderr)
         return 1
 
+    print("verifying every refitted worker through model_info ...")
+    mismatches = _verify_weight_versions(rl, targets, str(args.weight_version), args.timeout)
+    if mismatches:
+        for problem in mismatches:
+            print(f"MISMATCH {problem}", file=sys.stderr)
+        return 1
     try:
         got = _generate_weight_version(args.smg, model, args.api_key, args.timeout)
     except Exception:
         traceback.print_exc()
-        print("could not verify the refit through /generate", file=sys.stderr)
+        print("every worker reports the new version, but /generate did not answer", file=sys.stderr)
         return 1
-    print(f"/generate reported weight_version={got}")
-    if got != str(args.weight_version):
-        print("MISMATCH: engine did not report the new version", file=sys.stderr)
-        return 1
+    print(f"/generate answered; its worker reported weight_version={got}")
     if problems:
         print(
             "the refit landed but teardown did not finish cleanly; see the WARN lines above",

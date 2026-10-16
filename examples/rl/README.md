@@ -31,10 +31,13 @@ SGLang only. TokenSpeed answers `update_weights_from_disk` (and
 
 ## refit_from_trainer.py
 
-The trainer-driven NCCL refit, which is slime's path and the only one
-TokenSpeed implements. The trainer holds rank 0 of a process group every engine
-rank joins and broadcasts each weight into the engines, which load them as they
-arrive. Same pause/refit/resume/verify shape as the disk example.
+slime uses the trainer-driven NCCL refit, and TokenSpeed supports only this
+path. The trainer holds rank 0 of a process group every engine rank joins and
+broadcasts each weight into the engines, which load them as they arrive. Same
+pause/refit/resume shape as the disk example; the verification asks every
+refitted worker for its `weight_version` through the per-worker `model_info`
+call (`/generate` goes through model routing, so it could answer from a worker
+outside the selector), then sends one `/generate` as a smoke test.
 
 ```bash
 python examples/rl/refit_from_trainer.py --smg http://127.0.0.1:30000 \
@@ -67,10 +70,10 @@ TP-1 engines make a world of 3. `init_weights_update_group` goes to each worker
 separately (every one needs its own `rank_offset`); the broadcast itself is one
 fan-out per chunk, since the body is identical everywhere.
 
-A TokenSpeed engine launched without an explicit parallelism flag reports no
-`tp_size` at all, and the script then assumes 1 and says so on stderr. Pass
-`--tp-size` when that assumption is wrong: a bad rank layout deadlocks the
-group instead of failing.
+A TokenSpeed engine can report no `tp_size` at all: the newest builds nest
+their parallelism under `mapping.*`, which discovery does not read yet. The
+script then assumes 1 and says so on stderr. Pass `--tp-size` when that
+assumption is wrong: a bad rank layout deadlocks the group instead of failing.
 
 Exit code 0 on success, 1 on any failure — including a refit that lands but
 whose teardown does not.

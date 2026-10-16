@@ -14,6 +14,7 @@ import logging
 
 import httpx
 import pytest
+from infra import get_tokenspeed_servicer_impl
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,14 @@ class RlControlPlaneBehavior:
     @property
     def selector(self) -> str:
         return f"engine={self.ENGINE}"
+
+    def _engine(self, gateway, op: str, body: dict, timeout: float = TIMEOUT) -> httpx.Response:
+        return httpx.post(
+            f"{gateway.base_url}/v1/rl/engine/{op}",
+            params={"selector": self.selector},
+            json=body,
+            timeout=timeout,
+        )
 
     def _workers(self, gateway):
         resp = httpx.get(f"{gateway.base_url}/v1/rl/workers", timeout=TIMEOUT)
@@ -100,21 +109,21 @@ class TestRlControlPlaneSglang(RlControlPlaneBehavior):
         w = self._workers(gateway)["workers"][0]
         model_path = w["labels"].get("model_path") or w["labels"].get("model")
         assert model_path, w["labels"]
-        for op, body in (
-            ("pause_generation", {}),
-            (
+        resp = self._engine(gateway, "pause_generation", {})
+        assert resp.status_code == 200, f"pause_generation: {resp.text}"
+        try:
+            resp = self._engine(
+                gateway,
                 "update_weights_from_disk",
                 {"model_path": model_path, "weight_version": "e2e-refit", "flush_cache": True},
-            ),
-            ("continue_generation", {}),
-        ):
-            resp = httpx.post(
-                f"{gateway.base_url}/v1/rl/engine/{op}",
-                params={"selector": self.selector},
-                json=body,
                 timeout=REFIT_TIMEOUT,
             )
-            assert resp.status_code == 200, f"{op}: {resp.text}"
+            assert resp.status_code == 200, f"update_weights_from_disk: {resp.text}"
+        finally:
+            # Resume even when the refit assertion fails: the worker is shared
+            # with the tests that follow, and a paused one would fail them all.
+            resumed = self._engine(gateway, "continue_generation", {})
+        assert resumed.status_code == 200, f"continue_generation: {resumed.text}"
         resp = httpx.post(
             f"{gateway.base_url}/generate",
             json={"model": model, "text": "Hello", "sampling_params": {"max_new_tokens": 4}},
@@ -126,6 +135,11 @@ class TestRlControlPlaneSglang(RlControlPlaneBehavior):
         assert first["meta_info"]["weight_version"] == "e2e-refit", first["meta_info"]
 
 
+@pytest.mark.skipif(
+    get_tokenspeed_servicer_impl() == "rust",
+    reason="the Rust TokenSpeed servicer runs a headless scheduler with no in-engine "
+    "control app, so its worker advertises no rl.control_url",
+)
 @pytest.mark.engine("tokenspeed")
 @pytest.mark.gpu(1)
 @pytest.mark.e2e
@@ -162,37 +176,29 @@ class TestRlControlPlaneTokenSpeed(RlControlPlaneBehavior):
         model_path = w["labels"].get("model_path") or w["labels"].get("model")
         assert model_path, w["labels"]
 
-        resp = httpx.post(
-            f"{gateway.base_url}/v1/rl/engine/pause_generation",
-            params={"selector": self.selector},
-            json={},
-            timeout=TIMEOUT,
-        )
-        assert resp.status_code == 200, resp.text
-
-        resp = httpx.post(
-            f"{gateway.base_url}/v1/rl/engine/update_weights_from_disk",
-            params={"selector": self.selector},
-            json={"model_path": model_path, "weight_version": "e2e-refused", "flush_cache": True},
-            timeout=REFIT_TIMEOUT,
-        )
-        assert resp.status_code == 207, resp.text
-        body = resp.json()
-        assert body["succeeded"] == 0
-        assert len(body["failed"]) == 1, body["failed"]
-        failure = body["failed"][0]
-        assert failure["error"] == "upstream_error"
-        assert failure["status"] == 501
-        outcome = body["results"][failure["worker_id"]]
-        assert "distributed" in outcome["body"]["message"]
-
-        resp = httpx.post(
-            f"{gateway.base_url}/v1/rl/engine/continue_generation",
-            params={"selector": self.selector},
-            json={},
-            timeout=TIMEOUT,
-        )
-        assert resp.status_code == 200, resp.text
+        resp = self._engine(gateway, "pause_generation", {})
+        assert resp.status_code == 200, f"pause_generation: {resp.text}"
+        try:
+            resp = self._engine(
+                gateway,
+                "update_weights_from_disk",
+                {"model_path": model_path, "weight_version": "e2e-refused", "flush_cache": True},
+                timeout=REFIT_TIMEOUT,
+            )
+            assert resp.status_code == 207, resp.text
+            body = resp.json()
+            assert body["succeeded"] == 0
+            assert len(body["failed"]) == 1, body["failed"]
+            failure = body["failed"][0]
+            assert failure["error"] == "upstream_error"
+            assert failure["status"] == 501
+            outcome = body["results"][failure["worker_id"]]
+            assert "distributed" in outcome["body"]["message"]
+        finally:
+            # The refusal leaves the engine paused like any other control
+            # call would; resume it whatever the assertions above decided.
+            resumed = self._engine(gateway, "continue_generation", {})
+        assert resumed.status_code == 200, f"continue_generation: {resumed.text}"
 
         completion = client.chat.completions.create(
             model=model,

@@ -48,6 +48,10 @@ class ServerArgsSection:
     reasoning_parser: Any
     # The attention-DP width (``mapping.attn.dp_size``) when the args carry one.
     attention_dp_size: int | None
+    # The resolved ``mapping.attn.tp_size`` where attention DP and context
+    # parallelism are off; None without a resolved layout, and under attention
+    # DP or CP, where the attention width is narrower than the engine's.
+    tp_size: int | None
     # The admission window, under TokenSpeed's spelling or the frontend's; 0 when unset.
     running_window: int
     page_size: int
@@ -77,6 +81,7 @@ class ServerArgsSection:
             attention_dp_size=positive_int(
                 getattr(getattr(mapping, "attn", None), "dp_size", None)
             ),
+            tp_size=_plain_tp_size(getattr(mapping, "attn", None)),
             running_window=int(
                 getattr(server_args, "max_num_seqs", 0)
                 or getattr(server_args, "max_running_requests", 0)
@@ -90,6 +95,24 @@ class ServerArgsSection:
                 getattr(server_args, "constrained_decoding", None)
             ),
         )
+
+
+def _plain_tp_size(attn: Any) -> int | None:
+    if attn is None:
+        return None
+    if any(
+        (positive_int(getattr(attn, k, None)) or 1) > 1 for k in ("dp_size", "qcp_size", "kvp_size")
+    ):
+        return None
+    return positive_int(getattr(attn, "tp_size", None))
+
+
+def advertise_layout(args: dict[str, Any], section: ServerArgsSection) -> None:
+    """Fill ``attn_tp_size``, which the gateway reads as the worker's ``tp_size``,
+    with the resolved width where the layout is plain. Otherwise the server
+    args go out as the engine set them."""
+    if section.tp_size is not None:
+        args["attn_tp_size"] = section.tp_size
 
 
 @dataclasses.dataclass(frozen=True)

@@ -48,6 +48,10 @@ class ServerArgsSection:
     reasoning_parser: Any
     # The attention-DP width (``mapping.attn.dp_size``) when the args carry one.
     attention_dp_size: int | None
+    # The attention-TP width: the resolved ``mapping.attn.tp_size``, else the
+    # ``attn_tp_size`` field, which TokenSpeed leaves unset unless the command
+    # line sets it.
+    attention_tp_size: int | None
     # The admission window, under TokenSpeed's spelling or the frontend's; 0 when unset.
     running_window: int
     page_size: int
@@ -77,6 +81,8 @@ class ServerArgsSection:
             attention_dp_size=positive_int(
                 getattr(getattr(mapping, "attn", None), "dp_size", None)
             ),
+            attention_tp_size=positive_int(getattr(getattr(mapping, "attn", None), "tp_size", None))
+            or positive_int(getattr(server_args, "attn_tp_size", None)),
             running_window=int(
                 getattr(server_args, "max_num_seqs", 0)
                 or getattr(server_args, "max_running_requests", 0)

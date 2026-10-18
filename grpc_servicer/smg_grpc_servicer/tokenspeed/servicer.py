@@ -669,6 +669,11 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             if dp_size is not None and dp_size > 1:
                 server_args_dict["dp_size"] = dp_size
 
+        # The gateway reads ``attn_tp_size`` as the worker's ``tp_size``.
+        tp_size = self._config.server_args.attention_tp_size
+        if tp_size is not None:
+            server_args_dict["attn_tp_size"] = tp_size
+
         # The operator's PD pairing protocol rides with the server args, so
         # the gateway reads it as the worker's `pairing_protocol` label.
         pairing_protocol = pairing_protocol_from_env()

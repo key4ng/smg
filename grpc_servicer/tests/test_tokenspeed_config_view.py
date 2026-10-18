@@ -118,6 +118,24 @@ def test_the_attention_dp_width_is_a_count_or_none(mapping, expected):
     assert EngineConfigView(args).server_args.attention_dp_size == expected
 
 
+@pytest.mark.parametrize(
+    ("field", "mapping", "expected"),
+    [
+        # TokenSpeed leaves ``attn_tp_size`` unset unless the command line sets
+        # it; the resolved width is on the mapping.
+        (None, SimpleNamespace(attn=SimpleNamespace(tp_size=2)), 2),
+        (4, SimpleNamespace(attn=SimpleNamespace(tp_size=4)), 4),
+        (2, None, 2),
+        (None, None, None),
+        (None, SimpleNamespace(attn=SimpleNamespace(tp_size=0)), None),
+    ],
+)
+def test_the_attention_tp_width_comes_from_the_mapping_then_the_field(field, mapping, expected):
+    args = _server_args(attn_tp_size=field)
+    args.mapping = mapping
+    assert EngineConfigView(args).server_args.attention_tp_size == expected
+
+
 def test_the_running_window_takes_either_spelling_and_reads_zero_when_unset():
     assert EngineConfigView(SimpleNamespace(max_num_seqs=16)).server_args.running_window == 16
     assert (

@@ -555,11 +555,11 @@ class Worker:
             # ``logprobs=True`` requests get real per-token data back.
             "--enable-output-logprobs",
         ]
-        # Only the port: every TokenSpeed build accepts ``--rl-control-port``,
-        # while ``--rl-control-host`` is newer and would take down every
-        # TokenSpeed lane on a CI image that predates it. The engine binds the
-        # control app next to its gRPC listener, and the gateway resolves a
-        # wildcard host to the worker's own, so nothing here needs the flag.
+        # Only the port: without ``--rl-control-host`` the engine binds the
+        # control app on its own ``--host`` (the harness address the gateway
+        # already dials) and advertises that URL; a wildcard bind would not be
+        # advertised at all. ``ts serve`` always enables the control app, so
+        # every lane runs the engine as deployed.
         if self.rl_control_port is None:
             self.rl_control_port = get_open_port()
         cmd.extend(["--rl-control-port", str(self.rl_control_port)])

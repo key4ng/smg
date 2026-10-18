@@ -266,3 +266,79 @@ async fn control_calls_follow_each_worker_negotiated_http_version() {
     pinned_worker.stop().await;
     ctx.shutdown().await;
 }
+
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
+async fn post_worker(app: &axum::Router, url: &str) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post("/workers")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "url": url }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, json_of(resp).await)
+}
+
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
+async fn ready_workers_at(app: &axum::Router, url: &str) -> Vec<Value> {
+    let resp = app
+        .clone()
+        .oneshot(Request::get("/v1/rl/workers").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    json_of(resp).await["workers"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|w| w["url"] == url && w["health"] == "ready")
+        .collect()
+}
+
+/// A trainer such as slime registers its engines with `POST /workers` on every
+/// run and never deregisters them, so its second run posts URLs that are
+/// already registered (and, with health checks off, still read Ready). That
+/// POST replaces the worker in place, as `PUT /workers/{id}` does, and answers
+/// 202 with the same id instead of 409.
+#[tokio::test]
+async fn posting_a_registered_url_again_replaces_the_worker() {
+    let mut config = TestRouterConfig::round_robin(0);
+    config.rl.enabled = true;
+    let ctx = AppTestContext::new_with_config(config, vec![]).await;
+    let app = ctx.create_app();
+    let mut worker = MockWorker::new(mock(18910, 0.0));
+    let url = worker.start().await.unwrap();
+
+    let (status, first) = post_worker(&app, &url).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{first}");
+    let mut ready = Vec::new();
+    for _ in 0..50 {
+        ready = ready_workers_at(&app, &url).await;
+        if ready.len() == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(ready.len(), 1, "first registration never became ready");
+
+    let (status, second) = post_worker(&app, &url).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{second}");
+    assert_eq!(second["worker_id"], first["worker_id"]);
+    assert_eq!(second["location"], first["location"]);
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let ready = ready_workers_at(&app, &url).await;
+    assert_eq!(ready.len(), 1, "{ready:?}");
+    assert_eq!(ready[0]["id"], first["worker_id"]);
+    ctx.shutdown().await;
+}

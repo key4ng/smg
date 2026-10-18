@@ -211,7 +211,7 @@ pub enum WorkerServiceError {
     InvalidId { raw: String, message: String },
     /// Bad request (e.g., URL mismatch in PUT)
     BadRequest { message: String },
-    /// Worker with this URL already exists (duplicate POST)
+    /// A duplicate POST for a data-parallel worker, which cannot be replaced in place
     Conflict { url: String, worker_id: WorkerId },
     /// A create for this URL is still in flight (concurrent POST)
     CreateInProgress { url: String, worker_id: WorkerId },
@@ -270,8 +270,9 @@ impl std::fmt::Display for WorkerServiceError {
                 let id = worker_id.as_str();
                 write!(
                     f,
-                    "Worker already exists at URL '{url}' with ID {id}. \
-                    Use PUT /workers/{id} to replace or PATCH /workers/{id} to update."
+                    "Worker already exists at URL '{url}' with ID {id} and belongs to a \
+                    data-parallel group, which cannot be replaced in place. \
+                    Use DELETE /workers/{id} + POST to replace it, or PATCH /workers/{id} to update."
                 )
             }
             Self::CreateInProgress { url, worker_id } => {
@@ -483,12 +484,34 @@ impl WorkerService {
         let queue = self.get_job_queue()?;
 
         // Reserve (or retrieve) a stable ID for the 202 response.
-        // If this URL already has an active worker, reject with 409.
         let worker_id = self.worker_registry.reserve_id_for_url(&worker_url);
-        if self.worker_registry.get(&worker_id).is_some() {
-            return Err(WorkerServiceError::Conflict {
-                url: worker_url,
+        if let Some(existing) = self.worker_registry.get(&worker_id) {
+            // Trainers re-register their engines on every run and never delete
+            // them, and with health checks off a restarted engine's old entry
+            // still reads Ready. Re-registering replaces the worker in place,
+            // as PUT does. A data-parallel group cannot be replaced by one ID.
+            if self.router_config.dp_aware {
+                return Err(WorkerServiceError::Conflict {
+                    url: worker_url,
+                    worker_id,
+                });
+            }
+            let job = Job::AddWorker {
+                config: Box::new(config),
+                registration_mode: WorkerRegistrationMode::ReplaceById {
+                    worker_id: worker_id.as_str().to_string(),
+                    expected_revision: existing.revision(),
+                },
+            };
+            queue
+                .submit(job)
+                .await
+                .map_err(|e| WorkerServiceError::QueueSubmitFailed { message: e })?;
+            let location = format!("/workers/{}", worker_id.as_str());
+            return Ok(CreateWorkerResult {
                 worker_id,
+                url: worker_url,
+                location,
             });
         }
 

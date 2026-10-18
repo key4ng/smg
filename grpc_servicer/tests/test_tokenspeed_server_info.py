@@ -22,7 +22,7 @@ def _server_info(tokenspeed_servicer_mod, monkeypatch, **server_args):
     cls = tokenspeed_servicer_mod.TokenSpeedSchedulerServicer
     servicer = cls.__new__(cls)
     servicer.server_args = SimpleNamespace(
-        model="m", mapping=SimpleNamespace(attn=SimpleNamespace(dp_size=1)), **server_args
+        **{"model": "m", "mapping": SimpleNamespace(attn=SimpleNamespace(dp_size=1)), **server_args}
     )
     servicer.scheduler_info = {}
     servicer.start_time = 0.0
@@ -67,3 +67,32 @@ def test_server_info_reports_the_engines_constrained_decoding_policy(
     assert silent.constrained_decoding == ""
     unknown = _server_info(tokenspeed_servicer_mod, monkeypatch, constrained_decoding="sometimes")
     assert unknown.constrained_decoding == ""
+
+
+def test_the_resolved_tp_width_is_advertised_when_the_field_is_unset(
+    tokenspeed_servicer_mod, monkeypatch
+):
+    # TokenSpeed keeps the resolved width on ``mapping``; the gateway reads
+    # ``attn_tp_size`` as the worker's ``tp_size``.
+    info = _server_info(
+        tokenspeed_servicer_mod,
+        monkeypatch,
+        attn_tp_size=None,
+        mapping=SimpleNamespace(attn=SimpleNamespace(tp_size=2, dp_size=1)),
+    )
+    assert info.server_args["attn_tp_size"] == 2
+
+
+def test_no_tp_width_is_advertised_when_the_engine_gives_none(tokenspeed_servicer_mod, monkeypatch):
+    info = _server_info(tokenspeed_servicer_mod, monkeypatch, attn_tp_size=None)
+    assert "attn_tp_size" not in info.server_args or info.server_args["attn_tp_size"] is None
+
+
+def test_no_tp_width_is_advertised_under_attention_dp(tokenspeed_servicer_mod, monkeypatch):
+    info = _server_info(
+        tokenspeed_servicer_mod,
+        monkeypatch,
+        attn_tp_size=None,
+        mapping=SimpleNamespace(attn=SimpleNamespace(tp_size=2, dp_size=4)),
+    )
+    assert "attn_tp_size" not in info.server_args or info.server_args["attn_tp_size"] is None

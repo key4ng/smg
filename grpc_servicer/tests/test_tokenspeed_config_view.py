@@ -118,22 +118,31 @@ def test_the_attention_dp_width_is_a_count_or_none(mapping, expected):
     assert EngineConfigView(args).server_args.attention_dp_size == expected
 
 
+def _attn(**kw):
+    return SimpleNamespace(attn=SimpleNamespace(**kw))
+
+
 @pytest.mark.parametrize(
     ("field", "mapping", "expected"),
     [
         # TokenSpeed leaves ``attn_tp_size`` unset unless the command line sets
-        # it; the resolved width is on the mapping.
-        (None, SimpleNamespace(attn=SimpleNamespace(tp_size=2)), 2),
-        (4, SimpleNamespace(attn=SimpleNamespace(tp_size=4)), 4),
+        # it; the resolved width is on the mapping, which wins over the field.
+        (None, _attn(tp_size=2, dp_size=1), 2),
+        (2, _attn(tp_size=4, dp_size=1), 4),
         (2, None, 2),
         (None, None, None),
-        (None, SimpleNamespace(attn=SimpleNamespace(tp_size=0)), None),
+        (None, _attn(tp_size=0), None),
+        # Under attention DP or context parallelism the attention width is
+        # narrower than the engine's, so no TP width is advertised.
+        (None, _attn(tp_size=2, dp_size=4), None),
+        (None, _attn(tp_size=4, qcp_size=2), None),
+        (None, _attn(tp_size=4, kvp_size=2), None),
     ],
 )
-def test_the_attention_tp_width_comes_from_the_mapping_then_the_field(field, mapping, expected):
+def test_the_tp_width_is_the_resolved_one_when_the_layout_makes_it_plain(field, mapping, expected):
     args = _server_args(attn_tp_size=field)
     args.mapping = mapping
-    assert EngineConfigView(args).server_args.attention_tp_size == expected
+    assert EngineConfigView(args).server_args.tp_size == expected
 
 
 def test_the_running_window_takes_either_spelling_and_reads_zero_when_unset():

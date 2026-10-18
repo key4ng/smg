@@ -48,10 +48,11 @@ class ServerArgsSection:
     reasoning_parser: Any
     # The attention-DP width (``mapping.attn.dp_size``) when the args carry one.
     attention_dp_size: int | None
-    # The attention-TP width: the resolved ``mapping.attn.tp_size``, else the
-    # ``attn_tp_size`` field, which TokenSpeed leaves unset unless the command
-    # line sets it.
-    attention_tp_size: int | None
+    # The engine's TP width where its layout makes one plain: the resolved
+    # ``mapping.attn.tp_size`` with attention DP and context parallelism off
+    # (``attn_tp_size``, the field, only when there is no mapping); None under
+    # attention DP or CP, where the attention width is narrower than the engine.
+    tp_size: int | None
     # The admission window, under TokenSpeed's spelling or the frontend's; 0 when unset.
     running_window: int
     page_size: int
@@ -81,8 +82,7 @@ class ServerArgsSection:
             attention_dp_size=positive_int(
                 getattr(getattr(mapping, "attn", None), "dp_size", None)
             ),
-            attention_tp_size=positive_int(getattr(getattr(mapping, "attn", None), "tp_size", None))
-            or positive_int(getattr(server_args, "attn_tp_size", None)),
+            tp_size=_plain_tp_size(server_args, getattr(mapping, "attn", None)),
             running_window=int(
                 getattr(server_args, "max_num_seqs", 0)
                 or getattr(server_args, "max_running_requests", 0)
@@ -96,6 +96,24 @@ class ServerArgsSection:
                 getattr(server_args, "constrained_decoding", None)
             ),
         )
+
+
+def _plain_tp_size(server_args: Any, attn: Any) -> int | None:
+    if attn is None:
+        return positive_int(getattr(server_args, "attn_tp_size", None))
+    if any(
+        (positive_int(getattr(attn, k, None)) or 1) > 1 for k in ("dp_size", "qcp_size", "kvp_size")
+    ):
+        return None
+    return positive_int(getattr(attn, "tp_size", None)) or positive_int(
+        getattr(server_args, "attn_tp_size", None)
+    )
+
+
+def layout_labels(section: ServerArgsSection) -> dict[str, int]:
+    """The layout keys both TokenSpeed servicers add to the server args they
+    advertise. The gateway reads ``attn_tp_size`` as the worker's ``tp_size``."""
+    return {} if section.tp_size is None else {"attn_tp_size": section.tp_size}
 
 
 @dataclasses.dataclass(frozen=True)

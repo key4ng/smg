@@ -842,7 +842,7 @@ async fn get_loads(
 
 async fn create_worker(
     State(state): State<Arc<AppState>>,
-    AdminJson(body): AdminJson<serde_json::Value>,
+    AdminJson(body): AdminJson<Value>,
 ) -> Response {
     let request = match WorkerRequest::from_body(body) {
         Ok(request) => request,

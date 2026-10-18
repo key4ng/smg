@@ -918,7 +918,7 @@ mod tests {
         assert_eq!(result.total, 1);
     }
 
-    fn request(body: serde_json::Value) -> WorkerRequest {
+    fn request(body: Value) -> WorkerRequest {
         WorkerRequest::from_body(body).expect("a body the type takes")
     }
 
@@ -1058,7 +1058,7 @@ mod tests {
             let result = service
                 .create_worker(request(body.clone()))
                 .await
-                .expect(&body.to_string());
+                .unwrap_or_else(|e| panic!("{body}: {e}"));
             assert!(result.already_registered, "{body}");
         }
     }
@@ -1130,7 +1130,7 @@ mod tests {
     async fn create_worker_refuses_labels_and_fields_the_routers_cannot_read() {
         let service = make_service(Arc::new(WorkerRegistry::new()));
         let url = "grpc://10.0.0.5:8000";
-        let thousand: serde_json::Map<String, serde_json::Value> =
+        let thousand: serde_json::Map<String, Value> =
             (0..1000).map(|i| (format!("k{i}"), json!("v"))).collect();
         let refused = [
             (

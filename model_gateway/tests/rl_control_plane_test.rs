@@ -271,48 +271,46 @@ async fn control_calls_follow_each_worker_negotiated_http_version() {
     clippy::unwrap_used,
     reason = "test helper - panicking on failure is intentional"
 )]
-async fn post_worker(app: &axum::Router, spec: Value) -> (StatusCode, Value) {
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::post("/workers")
-                .header("content-type", "application/json")
-                .body(Body::from(spec.to_string()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+async fn send(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let req = Request::builder().method(method).uri(path);
+    let req = match body {
+        Some(b) => req
+            .header("content-type", "application/json")
+            .body(Body::from(b.to_string()))
+            .unwrap(),
+        None => req.body(Body::empty()).unwrap(),
+    };
+    let resp = app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
     (status, json_of(resp).await)
 }
 
-#[expect(
-    clippy::unwrap_used,
-    reason = "test helper - panicking on failure is intentional"
-)]
-async fn ready_ids_at(app: &axum::Router, url: &str) -> Vec<Value> {
-    let resp = app
-        .clone()
-        .oneshot(Request::get("/v1/rl/workers").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-    json_of(resp).await["workers"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|w| w["url"] == url && w["health"] == "ready")
-        .map(|w| w["id"].clone())
-        .collect()
+/// A worker reads Ready before its registration job finishes; a repeat in that
+/// window is answered 202, so the test waits for the job to settle first.
+async fn job_settles(app: &axum::Router, id: &str) -> bool {
+    for _ in 0..50 {
+        let (_, worker) = send(app, "GET", &format!("/workers/{id}"), None).await;
+        let status = &worker["job_status"]["status"];
+        if worker["id"] == id && status != "pending" && status != "processing" {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    false
 }
 
 /// slime registers each engine with `POST /workers {url, worker_type}` on
-/// every run and never deletes external engines, so its second run posts URLs
-/// that are already registered. A POST whose every field the worker already
-/// has answers 200 with the existing id; one that sets a different value is
-/// still a conflict and changes nothing.
+/// every run and never deletes external engines, so its second run repeats the
+/// request that registered the worker. That repeat answers 200 with the same
+/// id; any other POST for the URL is still a conflict. A PUT or DELETE ends
+/// the registration, so the old request is no longer a repeat after either.
 #[tokio::test]
-async fn reposting_a_registered_worker_is_answered_as_done() {
+async fn a_repeat_of_the_registering_post_is_answered_as_done() {
     let mut config = TestRouterConfig::round_robin(0);
     config.rl.enabled = true;
     let ctx = AppTestContext::new_with_config(config, vec![]).await;
@@ -321,35 +319,38 @@ async fn reposting_a_registered_worker_is_answered_as_done() {
     let url = worker.start().await.unwrap();
     let spec = json!({ "url": url, "worker_type": "regular" });
 
-    let (status, first) = post_worker(&app, spec.clone()).await;
+    let (status, first) = send(&app, "POST", "/workers", Some(spec.clone())).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{first}");
-    let mut ready = Vec::new();
-    for _ in 0..50 {
-        ready = ready_ids_at(&app, &url).await;
-        if ready.len() == 1 {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    assert_eq!(
-        ready,
-        vec![first["worker_id"].clone()],
-        "first registration never became ready"
+    let id = first["worker_id"].as_str().unwrap().to_string();
+    assert!(
+        job_settles(&app, &id).await,
+        "the registration never settled"
     );
 
-    let (status, again) = post_worker(&app, spec).await;
+    let (status, again) = send(&app, "POST", "/workers", Some(spec.clone())).await;
     assert_eq!(status, StatusCode::OK, "{again}");
     assert_eq!(again["worker_id"], first["worker_id"]);
     assert_eq!(again["location"], first["location"]);
 
-    let (status, other) = post_worker(&app, json!({ "url": url, "labels": { "run": "2" } })).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{other}");
-    assert_eq!(other["code"], "WORKER_ALREADY_EXISTS");
+    let other = json!({ "url": url, "labels": { "run": "2" } });
+    let (status, body) = send(&app, "POST", "/workers", Some(other.clone())).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "WORKER_ALREADY_EXISTS");
 
-    assert_eq!(
-        ready_ids_at(&app, &url).await,
-        vec![first["worker_id"].clone()]
+    let (status, body) = send(&app, "PUT", &format!("/workers/{id}"), Some(other)).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert!(
+        job_settles(&app, &id).await,
+        "the replacement never settled"
     );
+    let (status, body) = send(&app, "POST", "/workers", Some(spec.clone())).await;
+    assert_eq!(status, StatusCode::CONFLICT, "after a PUT: {body}");
+
+    let (status, body) = send(&app, "DELETE", &format!("/workers/{id}"), None).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let (status, body) = send(&app, "POST", "/workers", Some(spec)).await;
+    assert_ne!(status, StatusCode::OK, "after a DELETE: {body}");
+
     worker.stop().await;
     ctx.shutdown().await;
 }

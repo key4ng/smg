@@ -11,6 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use dashmap::DashMap;
 use openai_protocol::worker::{WorkerErrorResponse, WorkerInfo, WorkerSpec, WorkerUpdateRequest};
 use serde_json::{json, Value};
 use tracing::warn;
@@ -211,10 +212,8 @@ pub enum WorkerServiceError {
     InvalidId { raw: String, message: String },
     /// Bad request (e.g., URL mismatch in PUT)
     BadRequest { message: String },
-    /// A POST for a registered URL sets a value the worker does not have
+    /// A POST for a registered URL that is not a repeat of the registering request
     Conflict { url: String, worker_id: WorkerId },
-    /// A POST for a registered URL whose DELETE is still queued
-    RemovalInProgress { url: String, worker_id: WorkerId },
     /// A create for this URL is still in flight (concurrent POST)
     CreateInProgress { url: String, worker_id: WorkerId },
     /// The spec targets a provider whose router this build does not carry
@@ -236,7 +235,6 @@ impl WorkerServiceError {
             Self::InvalidId { .. } => "BAD_REQUEST",
             Self::BadRequest { .. } => "BAD_REQUEST",
             Self::Conflict { .. } => "WORKER_ALREADY_EXISTS",
-            Self::RemovalInProgress { .. } => "WORKER_REMOVAL_IN_PROGRESS",
             Self::CreateInProgress { .. } => "WORKER_CREATE_IN_PROGRESS",
             Self::ProviderNotCompiled { .. } => "PROVIDER_NOT_COMPILED",
             Self::QueueNotInitialized => "INTERNAL_SERVER_ERROR",
@@ -250,7 +248,6 @@ impl WorkerServiceError {
             Self::InvalidId { .. } => StatusCode::BAD_REQUEST,
             Self::BadRequest { .. } => StatusCode::BAD_REQUEST,
             Self::Conflict { .. } => StatusCode::CONFLICT,
-            Self::RemovalInProgress { .. } => StatusCode::CONFLICT,
             Self::CreateInProgress { .. } => StatusCode::CONFLICT,
             Self::ProviderNotCompiled { .. } => StatusCode::BAD_REQUEST,
             Self::QueueNotInitialized => StatusCode::INTERNAL_SERVER_ERROR,
@@ -274,16 +271,8 @@ impl std::fmt::Display for WorkerServiceError {
                 let id = worker_id.as_str();
                 write!(
                     f,
-                    "Worker already exists at URL '{url}' with ID {id} and a different \
-                    specification. Use PUT /workers/{id} to replace or PATCH /workers/{id} to update."
-                )
-            }
-            Self::RemovalInProgress { url, worker_id } => {
-                let id = worker_id.as_str();
-                write!(
-                    f,
-                    "Worker at URL '{url}' with ID {id} is being removed. \
-                    POST again once GET /workers/{id} returns 404."
+                    "Worker already exists at URL '{url}' with ID {id}, registered by a \
+                    different request. Use PUT /workers/{id} to replace or PATCH /workers/{id} to update."
                 )
             }
             Self::CreateInProgress { url, worker_id } => {
@@ -363,53 +352,21 @@ impl IntoResponse for CreateWorkerResult {
     }
 }
 
-/// A `POST /workers` body, with the fields it sets: a repeated registration is
-/// compared on those fields only.
+/// A `POST /workers` body: the parsed spec, and the body itself, which is what
+/// a repeated registration is compared with.
 #[derive(Debug, Clone)]
 pub struct WorkerRequest {
     pub spec: WorkerSpec,
-    pub fields: Vec<String>,
+    pub body: Value,
 }
 
 impl WorkerRequest {
     pub fn from_body(body: Value) -> Result<Self, WorkerServiceError> {
-        let fields = body
-            .as_object()
-            .map(|o| {
-                o.keys()
-                    .map(|k| match k.as_str() {
-                        "runtime" => "runtime_type".to_string(),
-                        _ => k.clone(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let spec = serde_json::from_value(body).map_err(|e| WorkerServiceError::BadRequest {
-            message: format!("Invalid JSON data: {e}"),
-        })?;
-        Ok(Self { spec, fields })
-    }
-
-    /// Whether `registered` already has every value this request sets. Labels
-    /// compare key by key, since discovery adds labels of its own.
-    fn is_satisfied_by(&self, registered: &WorkerSpec) -> bool {
-        let (Ok(Value::Object(want)), Ok(Value::Object(have))) = (
-            serde_json::to_value(&self.spec),
-            serde_json::to_value(registered),
-        ) else {
-            return false;
-        };
-        self.fields.iter().all(|field| match field.as_str() {
-            "url" => true,
-            "labels" => self
-                .spec
-                .labels
-                .iter()
-                .all(|(k, v)| registered.labels.get(k) == Some(v)),
-            // Never serialized, so compared on the specs themselves.
-            "api_key" => self.spec.api_key == registered.api_key,
-            key => want.get(key) == have.get(key),
-        })
+        let spec =
+            serde_json::from_value(body.clone()).map_err(|e| WorkerServiceError::BadRequest {
+                message: format!("Invalid JSON data: {e}"),
+            })?;
+        Ok(Self { spec, body })
     }
 }
 
@@ -507,6 +464,9 @@ pub struct WorkerService {
     worker_registry: Arc<WorkerRegistry>,
     job_queue: Arc<std::sync::OnceLock<Arc<JobQueue>>>,
     router_config: RouterConfig,
+    /// The body of the `POST /workers` that registered each URL, until a PUT
+    /// or DELETE ends that registration. A repeat of it is answered as done.
+    registrations: DashMap<String, Value>,
 }
 
 impl WorkerService {
@@ -520,6 +480,7 @@ impl WorkerService {
             worker_registry,
             job_queue,
             router_config,
+            registrations: DashMap::new(),
         }
     }
 
@@ -563,32 +524,33 @@ impl WorkerService {
 
         // Reserve (or retrieve) a stable ID for the 202 response.
         let worker_id = self.worker_registry.reserve_id_for_url(&worker_url);
-        if let Some(existing) = self.worker_registry.get(&worker_id) {
-            let removing = queue.get_status(&worker_url).is_some_and(|s| {
-                s.job_type == Job::REMOVE_WORKER
+        let registered = self.worker_registry.get(&worker_id).is_some();
+        // A trainer re-registers its engines on every run and a client may
+        // retry a POST whose answer it lost: a repeat of the request that
+        // registered this URL is answered as that request was, with no new job.
+        let repeat = self
+            .registrations
+            .get(&worker_url)
+            .is_some_and(|original| *original == request.body);
+        if repeat {
+            let registering = queue.get_status(&worker_url).is_some_and(|s| {
+                s.job_type == Job::ADD_WORKER
                     && matches!(s.status.as_str(), "pending" | "processing")
             });
-            if removing {
-                return Err(WorkerServiceError::RemovalInProgress {
-                    url: worker_url,
+            if registered || registering {
+                let location = format!("/workers/{}", worker_id.as_str());
+                return Ok(CreateWorkerResult {
                     worker_id,
+                    url: worker_url,
+                    location,
+                    already_registered: !registering,
                 });
             }
-            // A trainer re-registers its engines on every run and a client may
-            // retry a POST whose answer it lost: a request the worker already
-            // satisfies is done. A different value is a conflict for PUT/PATCH.
-            if !request.is_satisfied_by(&existing.metadata().spec) {
-                return Err(WorkerServiceError::Conflict {
-                    url: worker_url,
-                    worker_id,
-                });
-            }
-            let location = format!("/workers/{}", worker_id.as_str());
-            return Ok(CreateWorkerResult {
-                worker_id,
+        }
+        if registered {
+            return Err(WorkerServiceError::Conflict {
                 url: worker_url,
-                location,
-                already_registered: true,
+                worker_id,
             });
         }
 
@@ -612,6 +574,7 @@ impl WorkerService {
                 worker_id,
             });
         }
+        self.registrations.insert(worker_url.clone(), request.body);
 
         let location = format!("/workers/{}", worker_id.as_str());
 
@@ -701,6 +664,9 @@ impl WorkerService {
             .submit(job)
             .await
             .map_err(|e| WorkerServiceError::QueueSubmitFailed { message: e })?;
+        // The worker is now what this PUT says, so the POST that registered it
+        // is no longer a repeat.
+        self.registrations.remove(&url);
 
         Ok(UpdateWorkerResult { worker_id, url })
     }
@@ -798,6 +764,7 @@ impl WorkerService {
             .submit(job)
             .await
             .map_err(|e| WorkerServiceError::QueueSubmitFailed { message: e })?;
+        self.registrations.remove(&url);
 
         Ok(DeleteWorkerResult { worker_id, url })
     }
@@ -1013,72 +980,102 @@ mod tests {
             .expect("registers")
     }
 
-    /// A trainer registers its engines on every run (slime posts
+    /// The body that registered this URL, as `create_worker` keeps it.
+    fn registered_by(service: &WorkerService, body: Value) {
+        let url = body["url"].as_str().expect("a url").to_string();
+        service.registrations.insert(url, body);
+    }
+
+    /// A trainer registers its engines on every run (slime posts the same
     /// `{url, worker_type}` and never deletes external engines), and a client
-    /// may retry a POST whose answer it lost. A request whose every field the
-    /// worker already has is answered as done: 200, the existing id, no job.
+    /// may retry a POST whose answer it lost. A repeat of the request that
+    /// registered the worker is answered as done: 200, the existing id, no job.
     #[tokio::test]
-    async fn create_worker_answers_a_repeated_registration_as_done() {
+    async fn a_repeat_of_the_registering_request_is_answered_as_done() {
         let registry = Arc::new(WorkerRegistry::new());
-        let id = registered(
-            &registry,
-            BasicWorkerBuilder::new("http://10.0.0.8:8000").worker_type(WorkerType::Regular),
-        );
+        let id = registered(&registry, BasicWorkerBuilder::new("http://10.0.0.8:8000"));
         let (service, _queue) = service_with_dead_queue(registry);
+        let body = json!({"url": "http://10.0.0.8:8000", "worker_type": "regular"});
+        registered_by(&service, body.clone());
 
         let result = service
-            .create_worker(request(
-                json!({"url": "http://10.0.0.8:8000", "worker_type": "regular"}),
-            ))
+            .create_worker(request(body))
             .await
-            .expect("an identical registration is already done");
+            .expect("a repeat of the registering request is done");
         assert!(result.already_registered);
         assert_eq!(result.worker_id, id);
         assert_eq!(result.location, format!("/workers/{}", id.as_str()));
         assert_eq!(result.into_response().status(), StatusCode::OK);
     }
 
-    /// Only the fields the request sets are compared, so labels or a priority
-    /// set later through PATCH do not turn the trainer's next run into a 409.
     #[tokio::test]
-    async fn create_worker_compares_only_the_fields_the_request_sets() {
+    async fn key_order_does_not_make_a_repeat_different() {
         let registry = Arc::new(WorkerRegistry::new());
-        registered(
-            &registry,
-            BasicWorkerBuilder::new("http://10.0.0.9:8000")
-                .labels(HashMap::from([("team".to_string(), "a".to_string())]))
-                .priority(7),
-        );
+        registered(&registry, BasicWorkerBuilder::new("http://10.0.0.9:8000"));
         let (service, _queue) = service_with_dead_queue(registry);
+        registered_by(
+            &service,
+            json!({"url": "http://10.0.0.9:8000", "worker_type": "regular", "priority": 7}),
+        );
 
-        for body in [
-            json!({"url": "http://10.0.0.9:8000"}),
-            json!({"url": "http://10.0.0.9:8000", "labels": {"team": "a"}, "priority": 7}),
-        ] {
-            let result = service
-                .create_worker(request(body.clone()))
-                .await
-                .unwrap_or_else(|e| panic!("{body}: {e}"));
-            assert!(result.already_registered, "{body}");
-        }
+        let result = service
+            .create_worker(request(
+                json!({"priority": 7, "worker_type": "regular", "url": "http://10.0.0.9:8000"}),
+            ))
+            .await
+            .expect("the same request in another key order");
+        assert!(result.already_registered);
     }
 
+    /// While the registering job still runs, a repeat is answered as that
+    /// request was: 202 with the same id, and no second job.
     #[tokio::test]
-    async fn create_worker_refuses_a_different_specification() {
+    async fn a_repeat_while_the_registration_still_runs_is_accepted_again() {
         let registry = Arc::new(WorkerRegistry::new());
-        registered(
-            &registry,
-            BasicWorkerBuilder::new("http://10.0.0.10:8000")
-                .labels(HashMap::from([("team".to_string(), "a".to_string())]))
-                .priority(7),
-        );
+        let id = registered(&registry, BasicWorkerBuilder::new("http://10.0.0.10:8000"));
+        let (service, queue) = service_with_dead_queue(Arc::clone(&registry));
+        let body = json!({"url": "http://10.0.0.10:8000"});
+        registered_by(&service, body.clone());
+        queue.set_status_for_test(JobStatus::processing(
+            Job::ADD_WORKER,
+            "http://10.0.0.10:8000",
+        ));
+        let result = service
+            .create_worker(request(body))
+            .await
+            .expect("the first registration is still running");
+        assert!(!result.already_registered);
+        assert_eq!(result.worker_id, id);
+
+        // Before the job has registered the worker at all.
+        let reserved = registry.reserve_id_for_url("http://10.0.0.11:8000");
+        let body = json!({"url": "http://10.0.0.11:8000"});
+        registered_by(&service, body.clone());
+        queue.set_status_for_test(JobStatus::pending(Job::ADD_WORKER, "http://10.0.0.11:8000"));
+        let result = service
+            .create_worker(request(body))
+            .await
+            .expect("the first registration is queued");
+        assert!(!result.already_registered);
+        assert_eq!(result.worker_id, reserved);
+    }
+
+    /// Anything but the registering request is main's create-only answer: a
+    /// different value, a misspelled field, a body that leaves a field out.
+    #[tokio::test]
+    async fn any_other_post_for_a_registered_url_is_a_conflict() {
+        let registry = Arc::new(WorkerRegistry::new());
+        registered(&registry, BasicWorkerBuilder::new("http://10.0.0.12:8000"));
         let (service, _queue) = service_with_dead_queue(registry);
+        registered_by(
+            &service,
+            json!({"url": "http://10.0.0.12:8000", "worker_type": "regular"}),
+        );
 
         for body in [
-            json!({"url": "http://10.0.0.10:8000", "worker_type": "decode"}),
-            json!({"url": "http://10.0.0.10:8000", "labels": {"team": "b"}}),
-            json!({"url": "http://10.0.0.10:8000", "priority": 9}),
-            json!({"url": "http://10.0.0.10:8000", "api_key": "k"}),
+            json!({"url": "http://10.0.0.12:8000", "worker_type": "regular", "priority": 9}),
+            json!({"url": "http://10.0.0.12:8000", "worker_type": "regular", "prority": 9}),
+            json!({"url": "http://10.0.0.12:8000"}),
         ] {
             let err = service
                 .create_worker(request(body.clone()))
@@ -1093,110 +1090,35 @@ mod tests {
         }
     }
 
-    /// A worker whose DELETE is queued is about to go, so a registration that
-    /// matches it is not done: the caller is told to come back once it is gone.
+    /// A worker registered from config or by service discovery has no
+    /// registering request to repeat, so a POST for it stays a conflict.
     #[tokio::test]
-    async fn create_worker_refuses_to_re_register_a_worker_being_removed() {
+    async fn a_worker_registered_without_a_post_keeps_its_conflict() {
         let registry = Arc::new(WorkerRegistry::new());
-        registered(&registry, BasicWorkerBuilder::new("http://10.0.0.11:8000"));
-        let (service, queue) = service_with_dead_queue(registry);
-        queue.set_status_for_test(JobStatus::pending(
-            Job::REMOVE_WORKER,
-            "http://10.0.0.11:8000",
-        ));
+        registered(&registry, BasicWorkerBuilder::new("http://10.0.0.13:8000"));
+        let (service, _queue) = service_with_dead_queue(registry);
 
         let err = service
-            .create_worker(request(json!({"url": "http://10.0.0.11:8000"})))
+            .create_worker(request(json!({"url": "http://10.0.0.13:8000"})))
             .await
-            .expect_err("the worker is being removed");
-        assert!(matches!(err, WorkerServiceError::RemovalInProgress { .. }));
-        assert_eq!(err.status_code(), StatusCode::CONFLICT);
-        assert_eq!(err.error_code(), "WORKER_REMOVAL_IN_PROGRESS");
+            .expect_err("no request registered this worker");
+        assert!(matches!(err, WorkerServiceError::Conflict { .. }));
     }
 
-    #[test]
-    fn a_request_records_the_fields_it_sets_under_their_canonical_names() {
-        let req = request(json!({"url": "http://h:1", "runtime": "sglang", "priority": 3}));
-        let mut fields = req.fields.clone();
-        fields.sort();
-        assert_eq!(fields, ["priority", "runtime_type", "url"]);
-    }
-
-    /// A registration whose labels or fields the routers could not read is
-    /// refused at the boundary with a 400 naming the field, before any job
-    /// is queued; one they can read passes the boundary (and stops at the
-    /// uninitialized queue of this harness).
+    /// The registering attempt failed and left no worker: the repeat
+    /// registers afresh (here the dead queue refuses it).
     #[tokio::test]
-    async fn create_worker_refuses_labels_and_fields_the_routers_cannot_read() {
-        let service = make_service(Arc::new(WorkerRegistry::new()));
-        let url = "grpc://10.0.0.5:8000";
-        let thousand: serde_json::Map<String, Value> =
-            (0..1000).map(|i| (format!("k{i}"), json!("v"))).collect();
-        let refused = [
-            (
-                json!({"url": url, "labels": {"max_running_requests": "abc"}}),
-                "max_running_requests",
-            ),
-            (
-                json!({"url": url, "labels": {"max_running_requests": "0"}}),
-                "max_running_requests",
-            ),
-            (
-                json!({"url": url, "labels": {"dp_size": "zero"}}),
-                "dp_size",
-            ),
-            (
-                json!({"url": url, "labels": {"supports_vision": "maybe"}}),
-                "supports_vision",
-            ),
-            (
-                json!({"url": url, "labels": {"note": "x".repeat(4097)}}),
-                "note",
-            ),
-            (json!({"url": url, "labels": thousand}), "labels"),
-            (
-                json!({"url": url, "labels": {"key with space\nnewline": "v"}}),
-                "label key",
-            ),
-            (json!({"url": url, "cost": 0}), "cost"),
-            (json!({"url": url, "cost": -1.0}), "cost"),
-            (json!({"url": url, "kv_block_size": 0}), "kv_block_size"),
-            (json!({"url": url, "dp_rank": 1}), "dp_rank"),
-            (json!({"url": url, "dp_rank": 2, "dp_size": 2}), "dp_rank"),
-            (json!({"url": url, "bootstrap_port": 0}), "bootstrap_port"),
-            (
-                json!({"url": format!("grpc://{}:1", "a".repeat(2049))}),
-                "url",
-            ),
-        ];
-        for (body, field) in refused {
-            let err = service
-                .create_worker(request(body.clone()))
-                .await
-                .expect_err(&body.to_string());
-            assert!(
-                matches!(err, WorkerServiceError::BadRequest { .. }),
-                "{body}: {err}"
-            );
-            assert!(err.to_string().contains(field), "{body}: {err}");
-        }
-        // A window wider than 65535 passes the boundary: the routers saturate
-        // it. A window set here is the worker's only window, kept as set on
-        // every dp-aware rank worker; only a discovered one is divided per rank.
-        let spec = request(json!({
-            "url": url, "cost": 2.5, "kv_block_size": 16, "dp_rank": 1, "dp_size": 2,
-            "labels": {
-                "max_running_requests": "256", "max_num_seqs": "70000",
-                "supports_vision": "true", "served_model_name": "m"
-            }
-        }));
-        assert!(matches!(
-            service
-                .create_worker(spec)
-                .await
-                .expect_err("queue is uninitialized"),
-            WorkerServiceError::QueueNotInitialized
-        ));
+    async fn a_repeat_after_a_failed_registration_registers_afresh() {
+        let registry = Arc::new(WorkerRegistry::new());
+        let (service, _queue) = service_with_dead_queue(registry);
+        let body = json!({"url": "http://10.0.0.14:8000"});
+        registered_by(&service, body.clone());
+
+        let err = service
+            .create_worker(request(body))
+            .await
+            .expect_err("the dead queue refuses the new registration");
+        assert!(matches!(err, WorkerServiceError::QueueSubmitFailed { .. }));
     }
 
     /// An update is held to the same rules for the fields it may change.

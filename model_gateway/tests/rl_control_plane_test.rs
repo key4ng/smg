@@ -326,8 +326,11 @@ async fn get_worker(app: &axum::Router, id: &str) -> Value {
 /// that job is in flight is told to wait, so the test waits for the job.
 async fn job_settles(app: &axum::Router, id: &str) -> bool {
     for _ in 0..50 {
-        let status = get_worker(app, id).await["job_status"]["status"].clone();
-        if status != "pending" && status != "processing" {
+        let worker = get_worker(app, id).await;
+        let status = &worker["job_status"]["status"];
+        // The queue records a job before its 202 and drops the record when the
+        // job succeeds, so a worker with no job_status has nothing in flight.
+        if worker["id"] == id && status != "pending" && status != "processing" {
             return true;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

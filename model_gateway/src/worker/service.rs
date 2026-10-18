@@ -943,15 +943,7 @@ mod tests {
     #[tokio::test]
     async fn create_worker_releases_reservation_when_submission_fails() {
         let registry = Arc::new(WorkerRegistry::new());
-        // A queue whose AppContext is gone rejects every submission.
-        let queue = Arc::new(std::sync::OnceLock::new());
-        queue
-            .set(JobQueue::new(
-                JobQueueConfig::default(),
-                std::sync::Weak::new(),
-            ))
-            .ok();
-        let service = WorkerService::new(Arc::clone(&registry), queue, RouterConfig::default());
+        let (service, _queue) = service_with_dead_queue(Arc::clone(&registry));
         // Idempotent, so this is the id create_worker will hand out.
         let reserved = registry.reserve_id_for_url("grpc://10.0.0.5:8000");
 

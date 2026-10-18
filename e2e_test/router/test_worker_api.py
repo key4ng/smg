@@ -533,21 +533,35 @@ class TestWorkerAPIRestSemantics:
                 job_status: dict = {"status": "pending"}
                 while time.monotonic() < deadline:
                     info = httpx.get(f"{gateway.base_url}/workers/{worker_id}", timeout=10)
-                    job_status = info.json().get("job_status") or {}
-                    if job_status.get("status") not in ("pending", "processing"):
+                    body = info.json()
+                    job_status = body.get("job_status") or {}
+                    if body.get("id") == worker_id and job_status.get("status") not in (
+                        "pending",
+                        "processing",
+                    ):
                         break
                     time.sleep(0.5)
                 assert job_status.get("status") not in ("pending", "processing"), job_status
 
                 resp = httpx.post(
                     f"{gateway.base_url}/workers",
-                    json={"url": http_worker.base_url},
+                    json={"url": http_worker.base_url, "labels": {"run": "2"}},
                     timeout=10,
                 )
                 assert resp.status_code == 202, (
                     f"Expected 202 on a duplicate URL, got {resp.status_code}: {resp.text}"
                 )
                 assert resp.json()["worker_id"] == worker_id, resp.text
+
+                deadline = time.monotonic() + 60
+                labels: dict = {}
+                while time.monotonic() < deadline:
+                    info = httpx.get(f"{gateway.base_url}/workers/{worker_id}", timeout=10)
+                    labels = info.json().get("labels") or {}
+                    if labels.get("run") == "2":
+                        break
+                    time.sleep(0.5)
+                assert labels.get("run") == "2", f"the replacement never applied: {labels}"
                 logger.info("Duplicate POST replaced worker %s", worker_id)
             finally:
                 gateway.shutdown()

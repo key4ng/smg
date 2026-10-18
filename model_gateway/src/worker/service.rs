@@ -13,6 +13,7 @@ use axum::{
 };
 use dashmap::DashMap;
 use openai_protocol::worker::{WorkerErrorResponse, WorkerInfo, WorkerSpec, WorkerUpdateRequest};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tracing::warn;
 
@@ -352,22 +353,38 @@ impl IntoResponse for CreateWorkerResult {
     }
 }
 
-/// A `POST /workers` body: the parsed spec, and the body itself, which is what
-/// a repeated registration is compared with.
+/// A `POST /workers` body, parsed.
 #[derive(Debug, Clone)]
 pub struct WorkerRequest {
     pub spec: WorkerSpec,
-    pub body: Value,
 }
 
 impl WorkerRequest {
     pub fn from_body(body: Value) -> Result<Self, WorkerServiceError> {
-        let spec =
-            serde_json::from_value(body.clone()).map_err(|e| WorkerServiceError::BadRequest {
-                message: format!("Invalid JSON data: {e}"),
-            })?;
-        Ok(Self { spec, body })
+        let spec = WorkerSpec::deserialize(&body).map_err(|e| WorkerServiceError::BadRequest {
+            message: format!("Invalid JSON data: {e}"),
+        })?;
+        Ok(Self { spec })
     }
+
+    /// This request as a registration of `worker_id`: the parsed spec, so two
+    /// spellings of one request compare equal.
+    fn registration(&self, worker_id: WorkerId) -> Registration {
+        Registration {
+            worker_id,
+            spec: serde_json::to_value(&self.spec).unwrap_or_default(),
+            // Never serialized, so kept beside the spec.
+            api_key: self.spec.api_key.clone(),
+        }
+    }
+}
+
+/// The `POST /workers` request that registered a worker, kept per URL.
+#[derive(Debug, Clone, PartialEq)]
+struct Registration {
+    worker_id: WorkerId,
+    spec: Value,
+    api_key: Option<String>,
 }
 
 /// Result of deleting a worker (async job submission)
@@ -464,9 +481,9 @@ pub struct WorkerService {
     worker_registry: Arc<WorkerRegistry>,
     job_queue: Arc<std::sync::OnceLock<Arc<JobQueue>>>,
     router_config: RouterConfig,
-    /// The body of the `POST /workers` that registered each URL, until a PUT
-    /// or DELETE ends that registration. A repeat of it is answered as done.
-    registrations: DashMap<String, Value>,
+    /// The `POST /workers` request that registered each URL, until a PUT or
+    /// DELETE ends that registration. A repeat of it is answered as done.
+    registrations: DashMap<String, Registration>,
 }
 
 impl WorkerService {
@@ -531,7 +548,7 @@ impl WorkerService {
         let repeat = self
             .registrations
             .get(&worker_url)
-            .is_some_and(|original| *original == request.body);
+            .is_some_and(|original| *original == request.registration(worker_id.clone()));
         if repeat {
             let registering = queue.get_status(&worker_url).is_some_and(|s| {
                 s.job_type == Job::ADD_WORKER
@@ -574,7 +591,9 @@ impl WorkerService {
                 worker_id,
             });
         }
-        self.registrations.insert(worker_url.clone(), request.body);
+        self.prune_registrations();
+        self.registrations
+            .insert(worker_url.clone(), request.registration(worker_id.clone()));
 
         let location = format!("/workers/{}", worker_id.as_str());
 
@@ -584,6 +603,15 @@ impl WorkerService {
             location,
             already_registered: false,
         })
+    }
+
+    /// Drop the requests whose worker no longer holds its URL: a failed
+    /// registration, or a worker removed by the health checker, mesh sync or
+    /// service discovery. The store stays as large as the registered fleet.
+    fn prune_registrations(&self) {
+        self.registrations.retain(|url, r| {
+            self.worker_registry.get_url_by_id(&r.worker_id).as_deref() == Some(url.as_str())
+        });
     }
 
     /// A worker that targets a provider is reachable only through that
@@ -980,10 +1008,13 @@ mod tests {
             .expect("registers")
     }
 
-    /// The body that registered this URL, as `create_worker` keeps it.
+    /// The request that registered this URL, as `create_worker` keeps it.
     fn registered_by(service: &WorkerService, body: Value) {
         let url = body["url"].as_str().expect("a url").to_string();
-        service.registrations.insert(url, body);
+        let id = service.worker_registry.reserve_id_for_url(&url);
+        service
+            .registrations
+            .insert(url, request(body).registration(id));
     }
 
     /// A trainer registers its engines on every run (slime posts the same
@@ -1060,8 +1091,7 @@ mod tests {
         assert_eq!(result.worker_id, reserved);
     }
 
-    /// Anything but the registering request is main's create-only answer: a
-    /// different value, a misspelled field, a body that leaves a field out.
+    /// A request that parses to a different spec is main's create-only answer.
     #[tokio::test]
     async fn any_other_post_for_a_registered_url_is_a_conflict() {
         let registry = Arc::new(WorkerRegistry::new());
@@ -1074,8 +1104,8 @@ mod tests {
 
         for body in [
             json!({"url": "http://10.0.0.12:8000", "worker_type": "regular", "priority": 9}),
-            json!({"url": "http://10.0.0.12:8000", "worker_type": "regular", "prority": 9}),
-            json!({"url": "http://10.0.0.12:8000"}),
+            json!({"url": "http://10.0.0.12:8000", "worker_type": "decode"}),
+            json!({"url": "http://10.0.0.12:8000", "api_key": "k"}),
         ] {
             let err = service
                 .create_worker(request(body.clone()))
@@ -1088,6 +1118,69 @@ mod tests {
             assert_eq!(err.status_code(), StatusCode::CONFLICT);
             assert_eq!(err.error_code(), "WORKER_ALREADY_EXISTS");
         }
+    }
+
+    /// A repeat is the same request as parsed, so spelling it differently
+    /// (an explicit null, 2 for 2.0, the `runtime` alias) does not change it.
+    #[tokio::test]
+    async fn a_repeat_is_compared_as_the_parsed_request() {
+        let registry = Arc::new(WorkerRegistry::new());
+        registered(&registry, BasicWorkerBuilder::new("http://10.0.0.15:8000"));
+        let (service, _queue) = service_with_dead_queue(registry);
+        registered_by(
+            &service,
+            json!({"url": "http://10.0.0.15:8000", "cost": 2, "runtime_type": "sglang"}),
+        );
+
+        let result = service
+            .create_worker(request(json!({
+                "url": "http://10.0.0.15:8000", "cost": 2.0, "runtime": "sglang", "api_key": null
+            })))
+            .await
+            .expect("the same request, spelled differently");
+        assert!(result.already_registered);
+    }
+
+    /// The worker the request registered has gone (removed by the health
+    /// checker, say) and the URL was registered again by something else: the
+    /// old request is not a repeat of that registration.
+    #[tokio::test]
+    async fn a_request_for_a_worker_since_replaced_is_not_a_repeat() {
+        let registry = Arc::new(WorkerRegistry::new());
+        let (service, _queue) = service_with_dead_queue(Arc::clone(&registry));
+        let body = json!({"url": "http://10.0.0.16:8000"});
+        service.registrations.insert(
+            "http://10.0.0.16:8000".to_string(),
+            request(body.clone()).registration(WorkerId::new()),
+        );
+        registered(&registry, BasicWorkerBuilder::new("http://10.0.0.16:8000"));
+
+        let err = service
+            .create_worker(request(body))
+            .await
+            .expect_err("the stored request belongs to an earlier worker");
+        assert!(matches!(err, WorkerServiceError::Conflict { .. }));
+    }
+
+    #[tokio::test]
+    async fn pruning_drops_requests_whose_worker_left_its_url() {
+        let registry = Arc::new(WorkerRegistry::new());
+        let (service, _queue) = service_with_dead_queue(Arc::clone(&registry));
+        registered(&registry, BasicWorkerBuilder::new("http://10.0.0.17:8000"));
+        registered_by(&service, json!({"url": "http://10.0.0.17:8000"}));
+        service.registrations.insert(
+            "http://10.0.0.18:8000".to_string(),
+            request(json!({"url": "http://10.0.0.18:8000"})).registration(WorkerId::new()),
+        );
+
+        service.prune_registrations();
+        let mut kept: Vec<String> = service
+            .registrations
+            .iter()
+            .map(|e| e.key().clone())
+            .collect();
+        kept.sort();
+        assert_eq!(kept, ["http://10.0.0.17:8000"]);
     }
 
     /// A worker registered from config or by service discovery has no
@@ -1119,6 +1212,79 @@ mod tests {
             .await
             .expect_err("the dead queue refuses the new registration");
         assert!(matches!(err, WorkerServiceError::QueueSubmitFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn create_worker_refuses_labels_and_fields_the_routers_cannot_read() {
+        let service = make_service(Arc::new(WorkerRegistry::new()));
+        let url = "grpc://10.0.0.5:8000";
+        let thousand: serde_json::Map<String, Value> =
+            (0..1000).map(|i| (format!("k{i}"), json!("v"))).collect();
+        let refused = [
+            (
+                json!({"url": url, "labels": {"max_running_requests": "abc"}}),
+                "max_running_requests",
+            ),
+            (
+                json!({"url": url, "labels": {"max_running_requests": "0"}}),
+                "max_running_requests",
+            ),
+            (
+                json!({"url": url, "labels": {"dp_size": "zero"}}),
+                "dp_size",
+            ),
+            (
+                json!({"url": url, "labels": {"supports_vision": "maybe"}}),
+                "supports_vision",
+            ),
+            (
+                json!({"url": url, "labels": {"note": "x".repeat(4097)}}),
+                "note",
+            ),
+            (json!({"url": url, "labels": thousand}), "labels"),
+            (
+                json!({"url": url, "labels": {"key with space\nnewline": "v"}}),
+                "label key",
+            ),
+            (json!({"url": url, "cost": 0}), "cost"),
+            (json!({"url": url, "cost": -1.0}), "cost"),
+            (json!({"url": url, "kv_block_size": 0}), "kv_block_size"),
+            (json!({"url": url, "dp_rank": 1}), "dp_rank"),
+            (json!({"url": url, "dp_rank": 2, "dp_size": 2}), "dp_rank"),
+            (json!({"url": url, "bootstrap_port": 0}), "bootstrap_port"),
+            (
+                json!({"url": format!("grpc://{}:1", "a".repeat(2049))}),
+                "url",
+            ),
+        ];
+        for (body, field) in refused {
+            let err = service
+                .create_worker(request(body.clone()))
+                .await
+                .expect_err(&body.to_string());
+            assert!(
+                matches!(err, WorkerServiceError::BadRequest { .. }),
+                "{body}: {err}"
+            );
+            assert!(err.to_string().contains(field), "{body}: {err}");
+        }
+        // A window wider than 65535 passes the boundary: the routers saturate
+        // it. A window set here is the worker's only window, kept as set on
+        // every dp-aware rank worker; only a discovered one is divided per rank.
+        let spec = request(json!({
+            "url": url, "cost": 2.5, "kv_block_size": 16, "dp_rank": 1, "dp_size": 2,
+            "labels": {
+                "max_running_requests": "256", "max_num_seqs": "70000",
+                "supports_vision": "true", "served_model_name": "m"
+            }
+        }));
+        assert!(matches!(
+            service
+                .create_worker(spec)
+                .await
+                .expect_err("queue is uninitialized"),
+            WorkerServiceError::QueueNotInitialized
+        ));
     }
 
     /// An update is held to the same rules for the fields it may change.

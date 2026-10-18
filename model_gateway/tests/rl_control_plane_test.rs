@@ -271,13 +271,13 @@ async fn control_calls_follow_each_worker_negotiated_http_version() {
     clippy::unwrap_used,
     reason = "test helper - panicking on failure is intentional"
 )]
-async fn post_worker(app: &axum::Router, url: &str) -> (StatusCode, Value) {
+async fn post_worker(app: &axum::Router, spec: Value) -> (StatusCode, Value) {
     let resp = app
         .clone()
         .oneshot(
             Request::post("/workers")
                 .header("content-type", "application/json")
-                .body(Body::from(json!({ "url": url }).to_string()))
+                .body(Body::from(spec.to_string()))
                 .unwrap(),
         )
         .await
@@ -305,11 +305,41 @@ async fn ready_workers_at(app: &axum::Router, url: &str) -> Vec<Value> {
         .collect()
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
+async fn get_worker(app: &axum::Router, id: &str) -> Value {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/workers/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    json_of(resp).await
+}
+
+/// A worker reads Ready before its registration job finishes, and a POST while
+/// that job is in flight is told to wait, so the test waits for the job.
+async fn job_settles(app: &axum::Router, id: &str) -> bool {
+    for _ in 0..50 {
+        let status = get_worker(app, id).await["job_status"]["status"].clone();
+        if status != "pending" && status != "processing" {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    false
+}
+
 /// A trainer such as slime registers its engines with `POST /workers` on every
 /// run and never deregisters them, so its second run posts URLs that are
 /// already registered (and, with health checks off, still read Ready). That
-/// POST replaces the worker in place, as `PUT /workers/{id}` does, and answers
-/// 202 with the same id instead of 409.
+/// POST replaces the worker in place from the new spec, as `PUT /workers/{id}`
+/// does, and answers 202 with the same id instead of 409.
 #[tokio::test]
 async fn posting_a_registered_url_again_replaces_the_worker() {
     let mut config = TestRouterConfig::round_robin(0);
@@ -319,7 +349,7 @@ async fn posting_a_registered_url_again_replaces_the_worker() {
     let mut worker = MockWorker::new(mock(18910, 0.0));
     let url = worker.start().await.unwrap();
 
-    let (status, first) = post_worker(&app, &url).await;
+    let (status, first) = post_worker(&app, json!({ "url": url })).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{first}");
     let mut ready = Vec::new();
     for _ in 0..50 {
@@ -330,15 +360,31 @@ async fn posting_a_registered_url_again_replaces_the_worker() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     assert_eq!(ready.len(), 1, "first registration never became ready");
+    let id = first["worker_id"].as_str().unwrap();
+    assert!(
+        job_settles(&app, id).await,
+        "the first registration job never settled"
+    );
 
-    let (status, second) = post_worker(&app, &url).await;
+    let (status, second) = post_worker(&app, json!({ "url": url, "labels": { "run": "2" } })).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{second}");
     assert_eq!(second["worker_id"], first["worker_id"]);
     assert_eq!(second["location"], first["location"]);
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let mut label = None;
+    for _ in 0..50 {
+        label = get_worker(&app, id).await["labels"]["run"]
+            .as_str()
+            .map(str::to_string);
+        if label.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(label.as_deref(), Some("2"), "the replacement never applied");
     let ready = ready_workers_at(&app, &url).await;
     assert_eq!(ready.len(), 1, "{ready:?}");
     assert_eq!(ready[0]["id"], first["worker_id"]);
+    worker.stop().await;
     ctx.shutdown().await;
 }

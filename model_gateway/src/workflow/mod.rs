@@ -19,7 +19,7 @@ pub use data::{
 };
 // Typed workflow engines
 pub use engines::WorkflowEngines;
-pub use job_queue::{Job, JobQueue, JobQueueConfig};
+pub use job_queue::{Admission, Job, JobQueue, JobQueueConfig};
 pub use mcp_registration::{
     create_mcp_registration_workflow, create_mcp_workflow_data, ConnectMcpServerStep,
     McpServerConfigRequest, ValidateRegistrationStep,

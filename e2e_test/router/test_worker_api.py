@@ -510,11 +510,7 @@ class TestWorkerAPIRestSemantics:
     """
 
     def test_post_duplicate_url_replaces_the_worker(self):
-        """POST /workers with an already registered URL replaces that worker (as PUT does).
-
-        Trainers re-register their engines on every run without deleting them, so a
-        duplicate POST answers 202 with the same worker id instead of 409.
-        """
+        """A POST for a registered URL replaces that worker (as PUT does): 202, same id."""
         engine = os.environ.get("E2E_ENGINE", "sglang")
         http_workers = start_workers(
             "meta-llama/Llama-3.1-8B-Instruct", engine, mode=ConnectionMode.HTTP, count=1

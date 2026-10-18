@@ -21,9 +21,9 @@ use crate::{
     worker::{
         registry::WorkerId,
         worker::{merge_labels, worker_to_info},
-        WorkerRegistry, WorkerType,
+        WorkerOrigin, WorkerRegistry, WorkerType,
     },
-    workflow::{Job, JobQueue, WorkerRegistrationMode},
+    workflow::{Admission, Job, JobQueue, WorkerRegistrationMode},
 };
 
 /// Validate the URL of an incoming worker-management request, translating a
@@ -202,6 +202,17 @@ fn validate_labels(labels: &HashMap<String, String>) -> Result<(), WorkerService
     Ok(())
 }
 
+/// Why a duplicate `POST /workers` leaves the registered worker as it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictReason {
+    /// A data-parallel router registers one worker per rank, so one ID cannot be replaced.
+    DataParallel,
+    /// The worker was imported from a mesh peer, which owns its spec.
+    OwnedByPeer,
+    /// A removal of this worker is queued; a replacement would run after it and be dropped.
+    RemovalInProgress,
+}
+
 /// Error types for worker service operations
 #[derive(Debug)]
 pub enum WorkerServiceError {
@@ -211,8 +222,12 @@ pub enum WorkerServiceError {
     InvalidId { raw: String, message: String },
     /// Bad request (e.g., URL mismatch in PUT)
     BadRequest { message: String },
-    /// A duplicate POST for a data-parallel worker, which cannot be replaced in place
-    Conflict { url: String, worker_id: WorkerId },
+    /// A duplicate POST that cannot replace the registered worker in place
+    Conflict {
+        url: String,
+        worker_id: WorkerId,
+        reason: ConflictReason,
+    },
     /// A create for this URL is still in flight (concurrent POST)
     CreateInProgress { url: String, worker_id: WorkerId },
     /// The spec targets a provider whose router this build does not carry
@@ -266,14 +281,30 @@ impl std::fmt::Display for WorkerServiceError {
                 )
             }
             Self::BadRequest { message } => write!(f, "{message}"),
-            Self::Conflict { url, worker_id } => {
+            Self::Conflict {
+                url,
+                worker_id,
+                reason,
+            } => {
                 let id = worker_id.as_str();
-                write!(
-                    f,
-                    "Worker already exists at URL '{url}' with ID {id} and belongs to a \
-                    data-parallel group, which cannot be replaced in place. \
-                    Use DELETE /workers/{id} + POST to replace it, or PATCH /workers/{id} to update."
-                )
+                match reason {
+                    ConflictReason::DataParallel => write!(
+                        f,
+                        "Worker already exists at URL '{url}' with ID {id}. This router is \
+                        data-parallel aware, so it cannot replace a worker in place: \
+                        DELETE /workers/{id}, then POST again."
+                    ),
+                    ConflictReason::OwnedByPeer => write!(
+                        f,
+                        "Worker already exists at URL '{url}' with ID {id} and is owned by a \
+                        mesh peer. Register it on the node that owns it."
+                    ),
+                    ConflictReason::RemovalInProgress => write!(
+                        f,
+                        "Worker at URL '{url}' with ID {id} is being removed. POST again once \
+                        GET /workers/{id} returns 404."
+                    ),
+                }
             }
             Self::CreateInProgress { url, worker_id } => {
                 let id = worker_id.as_str();
@@ -489,30 +520,37 @@ impl WorkerService {
             // Trainers re-register their engines on every run and never delete
             // them, and with health checks off a restarted engine's old entry
             // still reads Ready. Re-registering replaces the worker in place,
-            // as PUT does. A data-parallel group cannot be replaced by one ID.
-            if self.router_config.dp_aware {
-                return Err(WorkerServiceError::Conflict {
-                    url: worker_url,
-                    worker_id,
-                });
-            }
-            let job = Job::AddWorker {
-                config: Box::new(config),
-                registration_mode: WorkerRegistrationMode::ReplaceById {
-                    worker_id: worker_id.as_str().to_string(),
-                    expected_revision: existing.revision(),
-                },
+            // as PUT does.
+            let conflict = |reason| WorkerServiceError::Conflict {
+                url: worker_url.clone(),
+                worker_id: worker_id.clone(),
+                reason,
             };
-            queue
-                .submit(job)
+            if self.router_config.dp_aware {
+                return Err(conflict(ConflictReason::DataParallel));
+            }
+            if self.worker_registry.origin_of(&worker_id) != Some(WorkerOrigin::Local) {
+                return Err(conflict(ConflictReason::OwnedByPeer));
+            }
+            let job = Self::replace_job(&worker_id, existing.revision(), config);
+            let admission = queue
+                .submit_unless_in_flight(job, &["AddWorker", "RemoveWorker"])
                 .await
                 .map_err(|e| WorkerServiceError::QueueSubmitFailed { message: e })?;
-            let location = format!("/workers/{}", worker_id.as_str());
-            return Ok(CreateWorkerResult {
-                worker_id,
-                url: worker_url,
-                location,
-            });
+            return match admission {
+                Admission::Submitted => Ok(CreateWorkerResult {
+                    location: format!("/workers/{}", worker_id.as_str()),
+                    worker_id,
+                    url: worker_url,
+                }),
+                Admission::Refused { in_flight } if in_flight == "RemoveWorker" => {
+                    Err(conflict(ConflictReason::RemovalInProgress))
+                }
+                Admission::Refused { .. } => Err(WorkerServiceError::CreateInProgress {
+                    url: worker_url,
+                    worker_id,
+                }),
+            };
         }
 
         let job = Job::AddWorker {
@@ -543,6 +581,19 @@ impl WorkerService {
             url: worker_url,
             location,
         })
+    }
+
+    /// Re-run registration for `worker_id` in place, bound to the revision the
+    /// caller validated: the job runs after the 202, so a concurrent DELETE or
+    /// replacement must make the write fail rather than resurrect or overwrite.
+    fn replace_job(worker_id: &WorkerId, expected_revision: u64, config: WorkerSpec) -> Job {
+        Job::AddWorker {
+            config: Box::new(config),
+            registration_mode: WorkerRegistrationMode::ReplaceById {
+                worker_id: worker_id.as_str().to_string(),
+                expected_revision,
+            },
+        }
     }
 
     /// A worker that targets a provider is reachable only through that
@@ -610,13 +661,7 @@ impl WorkerService {
         // so a concurrent DELETE, DELETE + POST, or second PUT must make the
         // write fail rather than resurrect this worker, overwrite its
         // successor, or restore this specification over a newer one.
-        let job = Job::AddWorker {
-            config: Box::new(config),
-            registration_mode: WorkerRegistrationMode::ReplaceById {
-                worker_id: worker_id.as_str().to_string(),
-                expected_revision: existing.revision(),
-            },
-        };
+        let job = Self::replace_job(&worker_id, existing.revision(), config);
 
         let job_queue = self.get_job_queue()?;
         job_queue
@@ -762,7 +807,7 @@ impl WorkerService {
 
 #[cfg(test)]
 mod tests {
-    use openai_protocol::model_card::ModelCard;
+    use openai_protocol::{model_card::ModelCard, worker::JobStatus};
 
     use super::*;
     use crate::{
@@ -911,6 +956,98 @@ mod tests {
 
         // The 202 was never sent, so nothing may keep the URL reserved (#1533).
         assert!(registry.get_url_by_id(&reserved).is_none());
+    }
+
+    /// A queue whose AppContext is gone rejects every submission, so a test
+    /// can tell a request that reached submission from one refused before it.
+    fn service_with_dead_queue(registry: Arc<WorkerRegistry>) -> (WorkerService, Arc<JobQueue>) {
+        let queue = JobQueue::new(JobQueueConfig::default(), std::sync::Weak::new());
+        let cell = Arc::new(std::sync::OnceLock::new());
+        cell.set(Arc::clone(&queue)).ok();
+        let service = WorkerService::new(registry, cell, RouterConfig::default());
+        (service, queue)
+    }
+
+    #[tokio::test]
+    async fn create_worker_for_a_registered_local_url_submits_a_replacement() {
+        let registry = Arc::new(WorkerRegistry::new());
+        register_worker(&registry, "http://10.0.0.8:8000", None);
+        let (service, _queue) = service_with_dead_queue(Arc::clone(&registry));
+
+        let err = service
+            .create_worker(worker_spec("http://10.0.0.8:8000"))
+            .await
+            .expect_err("the dead queue refuses the replacement");
+        assert!(matches!(err, WorkerServiceError::QueueSubmitFailed { .. }));
+        assert!(registry.get_id_by_url("http://10.0.0.8:8000").is_some());
+    }
+
+    #[tokio::test]
+    async fn create_worker_leaves_a_peer_owned_worker_to_its_owner() {
+        let registry = Arc::new(WorkerRegistry::new());
+        registry.on_remote_worker_state(&smg_mesh::WorkerState {
+            worker_id: "peer-w1".to_string(),
+            model_id: "llama-3".to_string(),
+            url: "http://remote:8080".to_string(),
+            health: true,
+            load: 0.0,
+            version: 1,
+            spec: vec![],
+            owner: "peer".to_string(),
+        });
+        let (service, _queue) = service_with_dead_queue(registry);
+
+        let err = service
+            .create_worker(worker_spec("http://remote:8080"))
+            .await
+            .expect_err("a peer's worker is not replaced from this node");
+        assert!(matches!(
+            err,
+            WorkerServiceError::Conflict {
+                reason: ConflictReason::OwnedByPeer,
+                ..
+            }
+        ));
+        assert_eq!(err.status_code(), StatusCode::CONFLICT);
+        assert_eq!(err.error_code(), "WORKER_ALREADY_EXISTS");
+    }
+
+    #[tokio::test]
+    async fn create_worker_refuses_to_replace_a_worker_whose_removal_is_queued() {
+        let registry = Arc::new(WorkerRegistry::new());
+        register_worker(&registry, "http://10.0.0.9:8000", None);
+        let (service, queue) = service_with_dead_queue(registry);
+        queue.set_status_for_test(JobStatus::pending("RemoveWorker", "http://10.0.0.9:8000"));
+
+        let err = service
+            .create_worker(worker_spec("http://10.0.0.9:8000"))
+            .await
+            .expect_err("the replacement would run after the removal and be dropped");
+        assert!(matches!(
+            err,
+            WorkerServiceError::Conflict {
+                reason: ConflictReason::RemovalInProgress,
+                ..
+            }
+        ));
+        assert_eq!(
+            queue.get_status("http://10.0.0.9:8000").map(|s| s.job_type),
+            Some("RemoveWorker".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn create_worker_tells_a_second_replacement_to_wait_for_the_first() {
+        let registry = Arc::new(WorkerRegistry::new());
+        register_worker(&registry, "http://10.0.0.10:8000", None);
+        let (service, queue) = service_with_dead_queue(registry);
+        queue.set_status_for_test(JobStatus::processing("AddWorker", "http://10.0.0.10:8000"));
+
+        let err = service
+            .create_worker(worker_spec("http://10.0.0.10:8000"))
+            .await
+            .expect_err("a replacement for this URL is already in flight");
+        assert!(matches!(err, WorkerServiceError::CreateInProgress { .. }));
     }
 
     /// A registration whose labels or fields the routers could not read is

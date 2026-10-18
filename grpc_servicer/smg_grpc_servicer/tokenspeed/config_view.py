@@ -48,10 +48,9 @@ class ServerArgsSection:
     reasoning_parser: Any
     # The attention-DP width (``mapping.attn.dp_size``) when the args carry one.
     attention_dp_size: int | None
-    # The engine's TP width where its layout makes one plain: the resolved
-    # ``mapping.attn.tp_size`` with attention DP and context parallelism off
-    # (``attn_tp_size``, the field, only when there is no mapping); None under
-    # attention DP or CP, where the attention width is narrower than the engine.
+    # The resolved ``mapping.attn.tp_size`` where attention DP and context
+    # parallelism are off; None without a resolved layout, and under attention
+    # DP or CP, where the attention width is narrower than the engine's.
     tp_size: int | None
     # The admission window, under TokenSpeed's spelling or the frontend's; 0 when unset.
     running_window: int
@@ -82,7 +81,7 @@ class ServerArgsSection:
             attention_dp_size=positive_int(
                 getattr(getattr(mapping, "attn", None), "dp_size", None)
             ),
-            tp_size=_plain_tp_size(server_args, getattr(mapping, "attn", None)),
+            tp_size=_plain_tp_size(getattr(mapping, "attn", None)),
             running_window=int(
                 getattr(server_args, "max_num_seqs", 0)
                 or getattr(server_args, "max_running_requests", 0)
@@ -98,26 +97,20 @@ class ServerArgsSection:
         )
 
 
-def _plain_tp_size(server_args: Any, attn: Any) -> int | None:
+def _plain_tp_size(attn: Any) -> int | None:
     if attn is None:
-        parallel = ("data_parallel_size", "query_context_parallel_size", "kv_parallel_size")
-        if any((positive_int(getattr(server_args, k, None)) or 1) > 1 for k in parallel):
-            return None
-        return positive_int(getattr(server_args, "attn_tp_size", None))
+        return None
     if any(
         (positive_int(getattr(attn, k, None)) or 1) > 1 for k in ("dp_size", "qcp_size", "kvp_size")
     ):
         return None
-    return positive_int(getattr(attn, "tp_size", None)) or positive_int(
-        getattr(server_args, "attn_tp_size", None)
-    )
+    return positive_int(getattr(attn, "tp_size", None))
 
 
 def advertise_layout(args: dict[str, Any], section: ServerArgsSection) -> None:
-    """Set the layout keys both TokenSpeed servicers advertise. The gateway
-    reads ``attn_tp_size`` as the worker's ``tp_size``, so the key carries the
-    plain width or nothing: the raw command-line field is dropped first."""
-    args.pop("attn_tp_size", None)
+    """Fill ``attn_tp_size``, which the gateway reads as the worker's ``tp_size``,
+    with the resolved width where the layout is plain. Otherwise the server
+    args go out as the engine set them."""
     if section.tp_size is not None:
         args["attn_tp_size"] = section.tp_size
 

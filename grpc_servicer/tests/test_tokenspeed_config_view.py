@@ -125,36 +125,24 @@ def _attn(**kw):
 @pytest.mark.parametrize(
     ("field", "mapping", "expected"),
     [
-        # TokenSpeed leaves ``attn_tp_size`` unset unless the command line sets
-        # it; the resolved width is on the mapping, which wins over the field.
+        # The resolved width, read off the mapping where the layout is plain.
         (None, _attn(tp_size=2, dp_size=1), 2),
         (2, _attn(tp_size=4, dp_size=1), 4),
-        (2, None, 2),
-        (None, None, None),
         (None, _attn(tp_size=0), None),
-        # Under attention DP or context parallelism the attention width is
-        # narrower than the engine's, so no TP width is advertised.
+        # No resolved layout: nothing is read (the engine's own field goes out as is).
+        (2, None, None),
+        (None, None, None),
+        # Attention DP or context parallelism: the attention width is narrower
+        # than the engine's, so nothing is read.
         (None, _attn(tp_size=2, dp_size=4), None),
         (None, _attn(tp_size=4, qcp_size=2), None),
         (None, _attn(tp_size=4, kvp_size=2), None),
     ],
 )
-def test_the_tp_width_is_the_resolved_one_when_the_layout_makes_it_plain(field, mapping, expected):
+def test_the_tp_width_is_read_off_a_plain_resolved_layout(field, mapping, expected):
     args = _server_args(attn_tp_size=field)
     args.mapping = mapping
     assert EngineConfigView(args).server_args.tp_size == expected
-
-
-@pytest.mark.parametrize(
-    "parallel",
-    ["data_parallel_size", "query_context_parallel_size", "kv_parallel_size"],
-)
-def test_without_a_mapping_the_field_is_trusted_only_with_dp_and_cp_off(parallel):
-    args = _server_args(attn_tp_size=2)
-    args.mapping = None
-    assert EngineConfigView(args).server_args.tp_size == 2
-    setattr(args, parallel, 4)
-    assert EngineConfigView(args).server_args.tp_size is None
 
 
 def test_the_running_window_takes_either_spelling_and_reads_zero_when_unset():

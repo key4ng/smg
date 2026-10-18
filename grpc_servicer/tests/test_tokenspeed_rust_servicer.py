@@ -350,13 +350,25 @@ def test_server_facts_carry_labels_window_and_kv_events(monkeypatch):
     assert plain["kv_events_replay_endpoint"] == ""
 
 
+@dataclasses.dataclass
+class _TpServerArgs(FakeServerArgs):
+    attn_tp_size: int | None = None
+
+
 def test_server_facts_carry_the_resolved_tp_width(monkeypatch):
-    # The Rust servicer advertises the same layout as the Python one.
     _stub_servicer_module(monkeypatch)
-    args = FakeServerArgs(mapping=SimpleNamespace(attn=SimpleNamespace(tp_size=2, dp_size=1)))
+    args = _TpServerArgs(mapping=SimpleNamespace(attn=SimpleNamespace(tp_size=2, dp_size=1)))
     assert json.loads(rust.server_facts(args)["server_args_json"])["attn_tp_size"] == 2
-    plain = json.loads(rust.server_facts(FakeServerArgs())["server_args_json"])
+    plain = json.loads(rust.server_facts(_TpServerArgs())["server_args_json"])
     assert "attn_tp_size" not in plain
+
+
+def test_server_facts_carry_no_tp_width_under_attention_dp(monkeypatch):
+    _stub_servicer_module(monkeypatch)
+    args = _TpServerArgs(
+        attn_tp_size=2, mapping=SimpleNamespace(attn=SimpleNamespace(tp_size=2, dp_size=4))
+    )
+    assert "attn_tp_size" not in json.loads(rust.server_facts(args)["server_args_json"])
 
 
 @dataclasses.dataclass

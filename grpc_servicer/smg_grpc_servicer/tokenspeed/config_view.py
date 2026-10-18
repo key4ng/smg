@@ -100,6 +100,9 @@ class ServerArgsSection:
 
 def _plain_tp_size(server_args: Any, attn: Any) -> int | None:
     if attn is None:
+        parallel = ("data_parallel_size", "query_context_parallel_size", "kv_parallel_size")
+        if any((positive_int(getattr(server_args, k, None)) or 1) > 1 for k in parallel):
+            return None
         return positive_int(getattr(server_args, "attn_tp_size", None))
     if any(
         (positive_int(getattr(attn, k, None)) or 1) > 1 for k in ("dp_size", "qcp_size", "kvp_size")
@@ -110,10 +113,13 @@ def _plain_tp_size(server_args: Any, attn: Any) -> int | None:
     )
 
 
-def layout_labels(section: ServerArgsSection) -> dict[str, int]:
-    """The layout keys both TokenSpeed servicers add to the server args they
-    advertise. The gateway reads ``attn_tp_size`` as the worker's ``tp_size``."""
-    return {} if section.tp_size is None else {"attn_tp_size": section.tp_size}
+def advertise_layout(args: dict[str, Any], section: ServerArgsSection) -> None:
+    """Set the layout keys both TokenSpeed servicers advertise. The gateway
+    reads ``attn_tp_size`` as the worker's ``tp_size``, so the key carries the
+    plain width or nothing: the raw command-line field is dropped first."""
+    args.pop("attn_tp_size", None)
+    if section.tp_size is not None:
+        args["attn_tp_size"] = section.tp_size
 
 
 @dataclasses.dataclass(frozen=True)

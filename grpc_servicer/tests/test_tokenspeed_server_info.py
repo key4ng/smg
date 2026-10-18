@@ -85,14 +85,15 @@ def test_the_resolved_tp_width_is_advertised_when_the_field_is_unset(
 
 def test_no_tp_width_is_advertised_when_the_engine_gives_none(tokenspeed_servicer_mod, monkeypatch):
     info = _server_info(tokenspeed_servicer_mod, monkeypatch, attn_tp_size=None)
-    assert "attn_tp_size" not in info.server_args or info.server_args["attn_tp_size"] is None
+    assert "attn_tp_size" not in info.server_args
 
 
 def test_no_tp_width_is_advertised_under_attention_dp(tokenspeed_servicer_mod, monkeypatch):
+    # The command-line field is the attention width too, so it does not pass through.
     info = _server_info(
         tokenspeed_servicer_mod,
         monkeypatch,
-        attn_tp_size=None,
+        attn_tp_size=2,
         mapping=SimpleNamespace(attn=SimpleNamespace(tp_size=2, dp_size=4)),
     )
-    assert "attn_tp_size" not in info.server_args or info.server_args["attn_tp_size"] is None
+    assert "attn_tp_size" not in info.server_args

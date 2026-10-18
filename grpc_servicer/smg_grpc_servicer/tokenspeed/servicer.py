@@ -48,7 +48,7 @@ from smg_grpc_servicer import mm_shm
 from smg_grpc_servicer.kv_events import endpoint_for_rank, stream_kv_events
 from smg_grpc_servicer.mm_rdma import RdmaPixelPuller
 from smg_grpc_servicer.tokenizer_bundle import build_tokenizer_zip, tokenizer_chunks
-from smg_grpc_servicer.tokenspeed.config_view import EngineConfigView, layout_labels
+from smg_grpc_servicer.tokenspeed.config_view import EngineConfigView, advertise_layout
 from smg_grpc_servicer.tokenspeed.health_servicer import TokenSpeedHealthServicer
 from smg_grpc_servicer.tokenspeed.kv_events import resolve_kv_events_config
 from smg_grpc_servicer.tokenspeed.loads import (
@@ -669,7 +669,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             if dp_size is not None and dp_size > 1:
                 server_args_dict["dp_size"] = dp_size
 
-        server_args_dict.update(layout_labels(self._config.server_args))
+        advertise_layout(server_args_dict, self._config.server_args)
 
         # The operator's PD pairing protocol rides with the server args, so
         # the gateway reads it as the worker's `pairing_protocol` label.

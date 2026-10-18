@@ -145,6 +145,18 @@ def test_the_tp_width_is_the_resolved_one_when_the_layout_makes_it_plain(field, 
     assert EngineConfigView(args).server_args.tp_size == expected
 
 
+@pytest.mark.parametrize(
+    "parallel",
+    ["data_parallel_size", "query_context_parallel_size", "kv_parallel_size"],
+)
+def test_without_a_mapping_the_field_is_trusted_only_with_dp_and_cp_off(parallel):
+    args = _server_args(attn_tp_size=2)
+    args.mapping = None
+    assert EngineConfigView(args).server_args.tp_size == 2
+    setattr(args, parallel, 4)
+    assert EngineConfigView(args).server_args.tp_size is None
+
+
 def test_the_running_window_takes_either_spelling_and_reads_zero_when_unset():
     assert EngineConfigView(SimpleNamespace(max_num_seqs=16)).server_args.running_window == 16
     assert (

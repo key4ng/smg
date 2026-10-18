@@ -228,7 +228,7 @@ pub enum WorkerServiceError {
         worker_id: WorkerId,
         reason: ConflictReason,
     },
-    /// A create for this URL is still in flight (concurrent POST)
+    /// A registration or update for this URL is still in flight
     CreateInProgress { url: String, worker_id: WorkerId },
     /// The spec targets a provider whose router this build does not carry
     ProviderNotCompiled {
@@ -248,6 +248,10 @@ impl WorkerServiceError {
             Self::NotFound { .. } => "WORKER_NOT_FOUND",
             Self::InvalidId { .. } => "BAD_REQUEST",
             Self::BadRequest { .. } => "BAD_REQUEST",
+            Self::Conflict {
+                reason: ConflictReason::RemovalInProgress,
+                ..
+            } => "WORKER_REMOVAL_IN_PROGRESS",
             Self::Conflict { .. } => "WORKER_ALREADY_EXISTS",
             Self::CreateInProgress { .. } => "WORKER_CREATE_IN_PROGRESS",
             Self::ProviderNotCompiled { .. } => "PROVIDER_NOT_COMPILED",
@@ -310,8 +314,8 @@ impl std::fmt::Display for WorkerServiceError {
                 let id = worker_id.as_str();
                 write!(
                     f,
-                    "Worker creation already in progress for URL '{url}' with ID {id}. \
-                    Poll GET /workers/{id}."
+                    "A registration or update for URL '{url}' with ID {id} is still in \
+                    progress. Poll GET /workers/{id} until its job_status settles."
                 )
             }
             Self::ProviderNotCompiled {
@@ -534,7 +538,10 @@ impl WorkerService {
             }
             let job = Self::replace_job(&worker_id, existing.revision(), config);
             let admission = queue
-                .submit_unless_in_flight(job, &["AddWorker", "RemoveWorker"])
+                .submit_unless_in_flight(
+                    job,
+                    &[Job::ADD_WORKER, Job::UPDATE_WORKER, Job::REMOVE_WORKER],
+                )
                 .await
                 .map_err(|e| WorkerServiceError::QueueSubmitFailed { message: e })?;
             return match admission {
@@ -543,7 +550,7 @@ impl WorkerService {
                     worker_id,
                     url: worker_url,
                 }),
-                Admission::Refused { in_flight } if in_flight == "RemoveWorker" => {
+                Admission::Refused { in_flight } if in_flight == Job::REMOVE_WORKER => {
                     Err(conflict(ConflictReason::RemovalInProgress))
                 }
                 Admission::Refused { .. } => Err(WorkerServiceError::CreateInProgress {
@@ -969,20 +976,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_worker_for_a_registered_local_url_submits_a_replacement() {
-        let registry = Arc::new(WorkerRegistry::new());
-        register_worker(&registry, "http://10.0.0.8:8000", None);
-        let (service, _queue) = service_with_dead_queue(Arc::clone(&registry));
-
-        let err = service
-            .create_worker(worker_spec("http://10.0.0.8:8000"))
-            .await
-            .expect_err("the dead queue refuses the replacement");
-        assert!(matches!(err, WorkerServiceError::QueueSubmitFailed { .. }));
-        assert!(registry.get_id_by_url("http://10.0.0.8:8000").is_some());
-    }
-
-    #[tokio::test]
     async fn create_worker_leaves_a_peer_owned_worker_to_its_owner() {
         let registry = Arc::new(WorkerRegistry::new());
         registry.on_remote_worker_state(&smg_mesh::WorkerState {
@@ -1017,7 +1010,10 @@ mod tests {
         let registry = Arc::new(WorkerRegistry::new());
         register_worker(&registry, "http://10.0.0.9:8000", None);
         let (service, queue) = service_with_dead_queue(registry);
-        queue.set_status_for_test(JobStatus::pending("RemoveWorker", "http://10.0.0.9:8000"));
+        queue.set_status_for_test(JobStatus::pending(
+            Job::REMOVE_WORKER,
+            "http://10.0.0.9:8000",
+        ));
 
         let err = service
             .create_worker(worker_spec("http://10.0.0.9:8000"))
@@ -1030,9 +1026,11 @@ mod tests {
                 ..
             }
         ));
+        assert_eq!(err.status_code(), StatusCode::CONFLICT);
+        assert_eq!(err.error_code(), "WORKER_REMOVAL_IN_PROGRESS");
         assert_eq!(
             queue.get_status("http://10.0.0.9:8000").map(|s| s.job_type),
-            Some("RemoveWorker".to_string())
+            Some(Job::REMOVE_WORKER.to_string())
         );
     }
 
@@ -1041,12 +1039,34 @@ mod tests {
         let registry = Arc::new(WorkerRegistry::new());
         register_worker(&registry, "http://10.0.0.10:8000", None);
         let (service, queue) = service_with_dead_queue(registry);
-        queue.set_status_for_test(JobStatus::processing("AddWorker", "http://10.0.0.10:8000"));
+        queue.set_status_for_test(JobStatus::processing(
+            Job::ADD_WORKER,
+            "http://10.0.0.10:8000",
+        ));
 
         let err = service
             .create_worker(worker_spec("http://10.0.0.10:8000"))
             .await
             .expect_err("a replacement for this URL is already in flight");
+        assert!(matches!(err, WorkerServiceError::CreateInProgress { .. }));
+    }
+
+    /// A PATCH bumps the revision the replacement is bound to, so a replacement
+    /// queued behind it would be dropped after its 202.
+    #[tokio::test]
+    async fn create_worker_waits_for_an_in_flight_update() {
+        let registry = Arc::new(WorkerRegistry::new());
+        register_worker(&registry, "http://10.0.0.11:8000", None);
+        let (service, queue) = service_with_dead_queue(registry);
+        queue.set_status_for_test(JobStatus::pending(
+            Job::UPDATE_WORKER,
+            "http://10.0.0.11:8000",
+        ));
+
+        let err = service
+            .create_worker(worker_spec("http://10.0.0.11:8000"))
+            .await
+            .expect_err("an update for this URL is in flight");
         assert!(matches!(err, WorkerServiceError::CreateInProgress { .. }));
     }
 

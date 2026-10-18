@@ -75,11 +75,15 @@ pub enum Job {
 
 impl Job {
     /// Get job type as string for logging
+    pub const ADD_WORKER: &'static str = "AddWorker";
+    pub const UPDATE_WORKER: &'static str = "UpdateWorker";
+    pub const REMOVE_WORKER: &'static str = "RemoveWorker";
+
     pub fn job_type(&self) -> &'static str {
         match self {
-            Job::AddWorker { .. } => "AddWorker",
-            Job::UpdateWorker { .. } => "UpdateWorker",
-            Job::RemoveWorker { .. } => "RemoveWorker",
+            Job::AddWorker { .. } => Self::ADD_WORKER,
+            Job::UpdateWorker { .. } => Self::UPDATE_WORKER,
+            Job::RemoveWorker { .. } => Self::REMOVE_WORKER,
             Job::InitializeWorkersFromConfig { .. } => "InitializeWorkersFromConfig",
             Job::InitializeMcpServers { .. } => "InitializeMcpServers",
             Job::RegisterMcpServer { .. } => "RegisterMcpServer",
@@ -126,12 +130,12 @@ impl Default for JobQueueConfig {
 }
 
 /// Outcome of [`JobQueue::submit_unless_in_flight`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Admission {
     Submitted,
     /// A job of this type is pending or processing for the same URL.
     Refused {
-        in_flight: String,
+        in_flight: &'static str,
     },
 }
 
@@ -245,7 +249,7 @@ impl JobQueue {
     pub async fn submit_unless_in_flight(
         &self,
         job: Job,
-        blocked_by: &[&str],
+        blocked_by: &[&'static str],
     ) -> Result<Admission, String> {
         let worker_url = job.worker_url().to_string();
         if let Err(in_flight) =
@@ -269,20 +273,19 @@ impl JobQueue {
         status_map: &DashMap<String, JobStatus>,
         url: &str,
         job_type: &'static str,
-        blocked_by: &[&str],
-    ) -> Result<(), String> {
-        match status_map.entry(url.to_string()) {
-            Entry::Occupied(e)
-                if blocked_by.contains(&e.get().job_type.as_str())
-                    && matches!(e.get().status.as_str(), "pending" | "processing") =>
-            {
-                Err(e.get().job_type.clone())
-            }
-            entry => {
-                entry.insert(JobStatus::pending(job_type, url));
-                Ok(())
+        blocked_by: &[&'static str],
+    ) -> Result<(), &'static str> {
+        let entry = status_map.entry(url.to_string());
+        if let Entry::Occupied(e) = &entry {
+            let status = e.get();
+            if matches!(status.status.as_str(), "pending" | "processing") {
+                if let Some(in_flight) = blocked_by.iter().find(|t| **t == status.job_type) {
+                    return Err(in_flight);
+                }
             }
         }
+        entry.insert(JobStatus::pending(job_type, url));
+        Ok(())
     }
 
     /// Submit a job with detailed queue status
@@ -1086,7 +1089,7 @@ mod tests {
         let map = Arc::new(DashMap::new());
         map.insert(
             "http://w:8000".to_string(),
-            JobStatus::pending("RemoveWorker", "http://w:8000"),
+            JobStatus::pending(Job::REMOVE_WORKER, "http://w:8000"),
         );
         assert_eq!(
             JobQueue::claim(
@@ -1095,7 +1098,7 @@ mod tests {
                 "AddWorker",
                 &["AddWorker", "RemoveWorker"]
             ),
-            Err("RemoveWorker".to_string())
+            Err(Job::REMOVE_WORKER)
         );
         assert_eq!(
             map.get("http://w:8000").map(|s| s.job_type.clone()),

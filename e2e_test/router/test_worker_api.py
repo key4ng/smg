@@ -527,6 +527,18 @@ class TestWorkerAPIRestSemantics:
                 assert success, f"First POST should succeed: {worker_id}"
                 logger.info("First POST succeeded: worker_id=%s", worker_id)
 
+                # The worker is listed before its registration job finishes, and a POST
+                # while that job is in flight is told to wait (WORKER_CREATE_IN_PROGRESS).
+                deadline = time.monotonic() + 60
+                job_status: dict = {"status": "pending"}
+                while time.monotonic() < deadline:
+                    info = httpx.get(f"{gateway.base_url}/workers/{worker_id}", timeout=10)
+                    job_status = info.json().get("job_status") or {}
+                    if job_status.get("status") not in ("pending", "processing"):
+                        break
+                    time.sleep(0.5)
+                assert job_status.get("status") not in ("pending", "processing"), job_status
+
                 resp = httpx.post(
                     f"{gateway.base_url}/workers",
                     json={"url": http_worker.base_url},

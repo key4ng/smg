@@ -290,7 +290,7 @@ async fn post_worker(app: &axum::Router, spec: Value) -> (StatusCode, Value) {
     clippy::unwrap_used,
     reason = "test helper - panicking on failure is intentional"
 )]
-async fn ready_workers_at(app: &axum::Router, url: &str) -> Vec<Value> {
+async fn ready_ids_at(app: &axum::Router, url: &str) -> Vec<Value> {
     let resp = app
         .clone()
         .oneshot(Request::get("/v1/rl/workers").body(Body::empty()).unwrap())
@@ -302,92 +302,54 @@ async fn ready_workers_at(app: &axum::Router, url: &str) -> Vec<Value> {
         .unwrap_or_default()
         .into_iter()
         .filter(|w| w["url"] == url && w["health"] == "ready")
+        .map(|w| w["id"].clone())
         .collect()
 }
 
-#[expect(
-    clippy::unwrap_used,
-    reason = "test helper - panicking on failure is intentional"
-)]
-async fn get_worker(app: &axum::Router, id: &str) -> Value {
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::get(format!("/workers/{id}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    json_of(resp).await
-}
-
-/// A worker reads Ready before its registration job finishes, and a POST while
-/// that job is in flight is told to wait, so the test waits for the job.
-async fn job_settles(app: &axum::Router, id: &str) -> bool {
-    for _ in 0..50 {
-        let worker = get_worker(app, id).await;
-        let status = &worker["job_status"]["status"];
-        // The queue records a job before its 202 and drops the record when the
-        // job succeeds, so a worker with no job_status has nothing in flight.
-        if worker["id"] == id && status != "pending" && status != "processing" {
-            return true;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    false
-}
-
-/// A trainer such as slime registers its engines with `POST /workers` on every
-/// run and never deregisters them, so its second run posts URLs that are
-/// already registered (and, with health checks off, still read Ready). That
-/// POST replaces the worker in place from the new spec, as `PUT /workers/{id}`
-/// does, and answers 202 with the same id instead of 409.
+/// slime registers each engine with `POST /workers {url, worker_type}` on
+/// every run and never deletes external engines, so its second run posts URLs
+/// that are already registered. A POST whose every field the worker already
+/// has answers 200 with the existing id; one that sets a different value is
+/// still a conflict and changes nothing.
 #[tokio::test]
-async fn posting_a_registered_url_again_replaces_the_worker() {
+async fn reposting_a_registered_worker_is_answered_as_done() {
     let mut config = TestRouterConfig::round_robin(0);
     config.rl.enabled = true;
     let ctx = AppTestContext::new_with_config(config, vec![]).await;
     let app = ctx.create_app();
     let mut worker = MockWorker::new(mock(18910, 0.0));
     let url = worker.start().await.unwrap();
+    let spec = json!({ "url": url, "worker_type": "regular" });
 
-    let (status, first) = post_worker(&app, json!({ "url": url })).await;
+    let (status, first) = post_worker(&app, spec.clone()).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{first}");
     let mut ready = Vec::new();
     for _ in 0..50 {
-        ready = ready_workers_at(&app, &url).await;
+        ready = ready_ids_at(&app, &url).await;
         if ready.len() == 1 {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    assert_eq!(ready.len(), 1, "first registration never became ready");
-    let id = first["worker_id"].as_str().unwrap();
-    assert!(
-        job_settles(&app, id).await,
-        "the first registration job never settled"
+    assert_eq!(
+        ready,
+        vec![first["worker_id"].clone()],
+        "first registration never became ready"
     );
 
-    let (status, second) = post_worker(&app, json!({ "url": url, "labels": { "run": "2" } })).await;
-    assert_eq!(status, StatusCode::ACCEPTED, "{second}");
-    assert_eq!(second["worker_id"], first["worker_id"]);
-    assert_eq!(second["location"], first["location"]);
+    let (status, again) = post_worker(&app, spec).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["worker_id"], first["worker_id"]);
+    assert_eq!(again["location"], first["location"]);
 
-    let mut label = None;
-    for _ in 0..50 {
-        label = get_worker(&app, id).await["labels"]["run"]
-            .as_str()
-            .map(str::to_string);
-        if label.is_some() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    assert_eq!(label.as_deref(), Some("2"), "the replacement never applied");
-    let ready = ready_workers_at(&app, &url).await;
-    assert_eq!(ready.len(), 1, "{ready:?}");
-    assert_eq!(ready[0]["id"], first["worker_id"]);
+    let (status, other) = post_worker(&app, json!({ "url": url, "labels": { "run": "2" } })).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{other}");
+    assert_eq!(other["code"], "WORKER_ALREADY_EXISTS");
+
+    assert_eq!(
+        ready_ids_at(&app, &url).await,
+        vec![first["worker_id"].clone()]
+    );
     worker.stop().await;
     ctx.shutdown().await;
 }

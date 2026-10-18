@@ -504,13 +504,13 @@ class TestWorkerAPIRestSemantics:
     """Tests for proper REST semantics on worker management endpoints.
 
     Verifies:
-    - POST /workers on a registered URL replaces that worker (202, same id)
+    - POST /workers with a registered URL: same spec is done (200), a different one is a 409
     - PUT /workers/{id} does full replace
     - PATCH /workers/{id} does partial update
     """
 
-    def test_post_duplicate_url_replaces_the_worker(self):
-        """A POST for a registered URL replaces that worker (as PUT does): 202, same id."""
+    def test_post_duplicate_url(self):
+        """A repeated POST with the same spec is done (200, same id); a different spec is a 409."""
         engine = os.environ.get("E2E_ENGINE", "sglang")
         http_workers = start_workers(
             "meta-llama/Llama-3.1-8B-Instruct", engine, mode=ConnectionMode.HTTP, count=1
@@ -527,42 +527,26 @@ class TestWorkerAPIRestSemantics:
                 assert success, f"First POST should succeed: {worker_id}"
                 logger.info("First POST succeeded: worker_id=%s", worker_id)
 
-                # The worker is listed before its registration job finishes, and a POST
-                # while that job is in flight is told to wait (WORKER_CREATE_IN_PROGRESS).
-                deadline = time.monotonic() + 60
-                job_status: dict = {"status": "pending"}
-                while time.monotonic() < deadline:
-                    info = httpx.get(f"{gateway.base_url}/workers/{worker_id}", timeout=10)
-                    body = info.json()
-                    job_status = body.get("job_status") or {}
-                    if body.get("id") == worker_id and job_status.get("status") not in (
-                        "pending",
-                        "processing",
-                    ):
-                        break
-                    time.sleep(0.5)
-                assert job_status.get("status") not in ("pending", "processing"), job_status
-
                 resp = httpx.post(
                     f"{gateway.base_url}/workers",
-                    json={"url": http_worker.base_url, "labels": {"run": "2"}},
+                    json={"url": http_worker.base_url},
                     timeout=10,
                 )
-                assert resp.status_code == 202, (
-                    f"Expected 202 on a duplicate URL, got {resp.status_code}: {resp.text}"
+                assert resp.status_code == 200, (
+                    f"Expected 200 on a repeated POST, got {resp.status_code}: {resp.text}"
                 )
                 assert resp.json()["worker_id"] == worker_id, resp.text
 
-                deadline = time.monotonic() + 60
-                labels: dict = {}
-                while time.monotonic() < deadline:
-                    info = httpx.get(f"{gateway.base_url}/workers/{worker_id}", timeout=10)
-                    labels = info.json().get("labels") or {}
-                    if labels.get("run") == "2":
-                        break
-                    time.sleep(0.5)
-                assert labels.get("run") == "2", f"the replacement never applied: {labels}"
-                logger.info("Duplicate POST replaced worker %s", worker_id)
+                resp = httpx.post(
+                    f"{gateway.base_url}/workers",
+                    json={"url": http_worker.base_url, "priority": 1},
+                    timeout=10,
+                )
+                assert resp.status_code == 409, (
+                    f"Expected 409 on a different spec, got {resp.status_code}: {resp.text}"
+                )
+                assert "WORKER_ALREADY_EXISTS" in resp.json().get("code", ""), resp.text
+                logger.info("Repeated POST answered 200; a different spec 409")
             finally:
                 gateway.shutdown()
         finally:

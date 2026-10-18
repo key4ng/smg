@@ -129,16 +129,6 @@ impl Default for JobQueueConfig {
     }
 }
 
-/// Outcome of [`JobQueue::submit_unless_in_flight`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Admission {
-    Submitted,
-    /// A job of this type is pending or processing for the same URL.
-    Refused {
-        in_flight: &'static str,
-    },
-}
-
 /// Job queue manager for worker validation and removal operations
 pub struct JobQueue {
     /// Channel for submitting jobs
@@ -239,66 +229,32 @@ impl JobQueue {
     /// status-map entry is taken atomically, so concurrent callers enqueue
     /// exactly one job per URL (#1533).
     pub async fn submit_if_idle(&self, job: Job) -> Result<bool, String> {
-        let job_type = job.job_type();
-        let admission = self.submit_unless_in_flight(job, &[job_type]).await?;
-        Ok(matches!(admission, Admission::Submitted))
-    }
-
-    /// Submit unless a pending or processing job of a type in `blocked_by`
-    /// holds this job's URL; a refusal names that job's type.
-    pub async fn submit_unless_in_flight(
-        &self,
-        job: Job,
-        blocked_by: &[&'static str],
-    ) -> Result<Admission, String> {
         let worker_url = job.worker_url().to_string();
-        let replaced = match Self::claim(&self.status_map, &worker_url, job.job_type(), blocked_by)
-        {
-            Ok(replaced) => replaced,
-            Err(in_flight) => return Ok(Admission::Refused { in_flight }),
-        };
-        self.submit(job)
-            .await
-            .map(|()| Admission::Submitted)
-            .inspect_err(move |_| {
-                // A failed submission owns no job: its claim must not block the
-                // next one, and the outcome it overwrote must stay readable.
-                match replaced {
-                    Some(previous) => {
-                        self.status_map.insert(worker_url, previous);
-                    }
-                    None => {
-                        self.status_map.remove(&worker_url);
-                    }
-                }
-            })
+        if !Self::claim(&self.status_map, &worker_url, job.job_type()) {
+            return Ok(false);
+        }
+        self.submit(job).await.map(|()| true).inspect_err(|_| {
+            // A failed submission owns no job, so its claim must not block the next one.
+            self.status_map.remove(&worker_url);
+        })
     }
 
-    /// Only an in-flight job of a type in `blocked_by` counts: the status map
-    /// is keyed by name across job types, so an MCP server or WASM module
-    /// named like a worker URL must not block that worker's AddWorker. A
-    /// successful claim returns the status it overwrote.
-    fn claim(
-        status_map: &DashMap<String, JobStatus>,
-        url: &str,
-        job_type: &'static str,
-        blocked_by: &[&'static str],
-    ) -> Result<Option<JobStatus>, &'static str> {
-        let entry = status_map.entry(url.to_string());
-        let replaced = match &entry {
-            Entry::Occupied(e) => {
-                let status = e.get();
-                if matches!(status.status.as_str(), "pending" | "processing") {
-                    if let Some(in_flight) = blocked_by.iter().find(|t| **t == status.job_type) {
-                        return Err(in_flight);
-                    }
-                }
-                Some(status.clone())
+    /// Only an in-flight job of the same type counts: the status map is keyed
+    /// by name across job types, so an MCP server or WASM module named like a
+    /// worker URL must not block that worker's AddWorker.
+    fn claim(status_map: &DashMap<String, JobStatus>, url: &str, job_type: &'static str) -> bool {
+        match status_map.entry(url.to_string()) {
+            Entry::Occupied(e)
+                if e.get().job_type == job_type
+                    && matches!(e.get().status.as_str(), "pending" | "processing") =>
+            {
+                false
             }
-            Entry::Vacant(_) => None,
-        };
-        entry.insert(JobStatus::pending(job_type, url));
-        Ok(replaced)
+            entry => {
+                entry.insert(JobStatus::pending(job_type, url));
+                true
+            }
+        }
     }
 
     /// Submit a job with detailed queue status
@@ -1070,9 +1026,7 @@ mod tests {
         let won: Vec<bool> = (0..16)
             .map(|_| {
                 let map = Arc::clone(&map);
-                std::thread::spawn(move || {
-                    JobQueue::claim(&map, "http://w:8000", "AddWorker", &["AddWorker"]).is_ok()
-                })
+                std::thread::spawn(move || JobQueue::claim(&map, "http://w:8000", "AddWorker"))
             })
             .collect::<Vec<_>>()
             .into_iter()
@@ -1084,70 +1038,14 @@ mod tests {
             "http://w:8000".to_string(),
             JobStatus::failed("AddWorker", "http://w:8000", "boom".to_string()),
         );
-        assert!(JobQueue::claim(&map, "http://w:8000", "AddWorker", &["AddWorker"]).is_ok());
+        assert!(JobQueue::claim(&map, "http://w:8000", "AddWorker"));
 
         // A different job type under the same key is not a competing claim.
         map.insert(
             "http://w:8000".to_string(),
             JobStatus::pending("RegisterMcpServer", "http://w:8000"),
         );
-        assert!(JobQueue::claim(&map, "http://w:8000", "AddWorker", &["AddWorker"]).is_ok());
-    }
-
-    /// A replacement must not be queued behind a removal of the same URL: it
-    /// would run on a worker that is gone and be dropped after a 202. The
-    /// refused claim leaves the removal's status in place.
-    #[test]
-    fn claim_refuses_while_a_blocking_job_type_is_in_flight() {
-        let map = Arc::new(DashMap::new());
-        map.insert(
-            "http://w:8000".to_string(),
-            JobStatus::pending(Job::REMOVE_WORKER, "http://w:8000"),
-        );
-        assert_eq!(
-            JobQueue::claim(
-                &map,
-                "http://w:8000",
-                "AddWorker",
-                &["AddWorker", "RemoveWorker"]
-            )
-            .err(),
-            Some(Job::REMOVE_WORKER)
-        );
-        assert_eq!(
-            map.get("http://w:8000").map(|s| s.job_type.clone()),
-            Some("RemoveWorker".to_string())
-        );
-        assert_eq!(
-            JobQueue::claim(&map, "http://w:8000", "AddWorker", &["AddWorker"])
-                .map(|replaced| replaced.map(|s| s.job_type)),
-            Ok(Some(Job::REMOVE_WORKER.to_string()))
-        );
-    }
-
-    /// A refused submission must leave the URL's last outcome readable: a
-    /// failed earlier replacement is the caller's only sign it never applied.
-    #[tokio::test]
-    async fn failed_submit_restores_the_status_its_claim_replaced() {
-        let queue = JobQueue::new(JobQueueConfig::default(), Weak::new());
-        queue.set_status_for_test(JobStatus::failed(
-            Job::ADD_WORKER,
-            "http://w:8000",
-            "boom".to_string(),
-        ));
-        let job = Job::AddWorker {
-            config: Box::new(WorkerSpec::new("http://w:8000")),
-            registration_mode: WorkerRegistrationMode::CreateOnly,
-        };
-        assert!(queue
-            .submit_unless_in_flight(job, &[Job::ADD_WORKER])
-            .await
-            .is_err());
-        let status = queue
-            .get_status("http://w:8000")
-            .expect("the failed status stays");
-        assert_eq!(status.status, "failed");
-        assert_eq!(status.message.as_deref(), Some("boom"));
+        assert!(JobQueue::claim(&map, "http://w:8000", "AddWorker"));
     }
 
     impl JobQueue {

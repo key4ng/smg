@@ -254,6 +254,9 @@ async fn fetch_tokenspeed_http_metadata(
             .await
     {
         pick_json_fields(&mut labels, &args, TOKENSPEED_GRPC_KEYS);
+        if let Some(width) = engine_tp_size(&args).filter(|_| !labels.contains_key("tp_size")) {
+            labels.insert("tp_size".to_string(), width.to_string());
+        }
         if let Some(version) = args
             .get("tokenspeed_version")
             .and_then(serde_json::Value::as_str)
@@ -268,6 +271,20 @@ async fn fetch_tokenspeed_http_metadata(
     add_models_identity(&mut labels, client, &base, api_key).await;
     normalize_grpc_keys(&mut labels);
     labels
+}
+
+/// The engine-wide TP width, SGLang's `tp_size`: TokenSpeed's control server
+/// reports no `tp_size`, only its resolved `mapping`, whose attention layout
+/// spans every GPU of a stage as `tp_size x dp_size`.
+fn engine_tp_size(args: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
+    let attn = args.get("mapping")?.get("attn")?;
+    let width = |key: &str| {
+        attn.get(key)
+            .and_then(serde_json::Value::as_f64)
+            .filter(|w| *w >= 1.0 && w.fract() == 0.0)
+            .map(|w| w as u64)
+    };
+    Some(width("tp_size")? * width("dp_size").unwrap_or(1))
 }
 
 /// The JSON twin of the gRPC path's `pick_prost_fields`: non-empty strings
@@ -457,11 +474,6 @@ async fn sampling_defaults_label(path: &std::path::Path) -> HashMap<String, Stri
 fn normalize_grpc_keys(labels: &mut HashMap<String, String>) {
     for &(from, to) in &[
         ("tensor_parallel_size", "tp_size"),
-        // TokenSpeed reports no `tp_size`: `attn_tp_size` is its attention
-        // TP width, the full width for a dense model and narrower than
-        // `world_size` only under attention DP or CP. A `tp_size` the engine
-        // does report wins, as for every canonical label below.
-        ("attn_tp_size", "tp_size"),
         ("pipeline_parallel_size", "pp_size"),
         ("context_parallel_size", "cp_size"),
         ("data_parallel_size", "dp_size"),
@@ -688,11 +700,14 @@ mod tests {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
         normalize_grpc_keys(&mut labels);
-        assert_eq!(labels.get("tp_size").map(String::as_str), Some("2"));
+        assert!(
+            !labels.contains_key("tp_size"),
+            "the attention width is not tp_size"
+        );
+        assert_eq!(labels.get("attn_tp_size").map(String::as_str), Some("2"));
         assert_eq!(labels.get("pp_size").map(String::as_str), Some("1"));
         assert_eq!(labels.get("dp_size").map(String::as_str), Some("4"));
         assert_eq!(labels.get("cp_size").map(String::as_str), Some("1"));
-        assert!(!labels.contains_key("attn_tp_size"));
         assert_eq!(labels.get("page_size").map(String::as_str), Some("16"));
         assert!(!labels.contains_key("block_size"));
         assert!(!labels.contains_key("uptime_seconds"));
@@ -704,7 +719,7 @@ mod tests {
             .collect();
         normalize_grpc_keys(&mut attn);
         assert_eq!(attn.get("tp_size").map(String::as_str), Some("8"));
-        assert!(!attn.contains_key("attn_tp_size"));
+        assert_eq!(attn.get("attn_tp_size").map(String::as_str), Some("2"));
 
         let mut both: HashMap<String, String> = [("tp_size", "8"), ("tensor_parallel_size", "2")]
             .into_iter()
@@ -864,7 +879,7 @@ mod tests {
                         "kvstore_io_backend": "kernel",
                         "disaggregation_mode": "null",
                         "served_model_name": "null",
-                        "mapping": {"attn": {"tp_size": 2.0}},
+                        "mapping": {"attn": {"tp_size": 2.0, "dp_size": 4.0}},
                         "rl.control_url": "http://0.0.0.0:48225",
                         "rl.update_from": "disk,distributed,mooncake",
                         "rl.pause_modes": "wait,abort,keep",
@@ -906,7 +921,12 @@ mod tests {
         server.abort();
 
         let get = |k: &str| labels.get(k).map(String::as_str);
-        assert_eq!(get("tp_size"), Some("2"));
+        assert_eq!(
+            get("tp_size"),
+            Some("8"),
+            "the engine-wide width, SGLang's tp_size"
+        );
+        assert_eq!(get("attn_tp_size"), Some("2"));
         assert_eq!(get("pp_size"), Some("1"));
         assert_eq!(get("version"), Some("0.1.1"));
         assert_eq!(get("rl.control_url"), Some("http://0.0.0.0:48225"));
@@ -917,7 +937,6 @@ mod tests {
         assert_eq!(get("served_model_name"), Some("qwen-served"));
         assert_eq!(get("max_model_len"), Some("4096"));
         for absent in [
-            "attn_tp_size",
             "mapping",
             "kvstore_io_backend",
             "dp_size",

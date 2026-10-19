@@ -7,8 +7,6 @@
 //! native types — the router consumes them through dedicated
 //! `ModelInfo::TokenSpeed` / `ServerInfo::TokenSpeed` enum arms.
 
-use std::{future::Future, pin::Pin, sync::Arc};
-
 use openai_protocol::{
     chat::ChatCompletionRequest, completion::CompletionRequest, generate::GenerateRequest,
     messages::CreateMessageRequest, responses::ResponsesRequest,
@@ -18,8 +16,11 @@ use tonic::{transport::Channel, Request};
 use tracing::{debug, warn};
 
 use crate::{
-    request_fields::{response_format_schema, stop_strings, PlainSampling},
-    AbortOnDropClient, BoxedTraceInjector, NoopTraceInjector,
+    request_fields::{
+        completion_constraint, plain_constraint, response_format_schema, stop_strings,
+        ConstraintKind, PlainSampling,
+    },
+    BoxedTraceInjector,
 };
 
 #[expect(clippy::allow_attributes)]
@@ -45,76 +46,14 @@ pub struct TokenSpeedSchedulerClient {
     trace_injector: BoxedTraceInjector,
 }
 
-impl AbortOnDropClient for TokenSpeedSchedulerClient {
-    fn abort_for_drop(
-        self,
-        request_id: String,
-    ) -> Pin<Box<dyn Future<Output = Result<(), tonic::Status>> + Send>> {
-        Box::pin(async move {
-            self.abort_request(request_id, "Stream dropped".to_string())
-                .await
-        })
-    }
-}
+crate::impl_abort_for_drop_with_reason!(TokenSpeedSchedulerClient);
 
 impl TokenSpeedSchedulerClient {
-    pub async fn connect(endpoint: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        Self::connect_with_trace_injector(endpoint, Arc::new(NoopTraceInjector)).await
-    }
-
-    pub async fn connect_with_trace_injector(
-        endpoint: &str,
-        trace_injector: BoxedTraceInjector,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        debug!("Connecting to TokenSpeed scheduler at {}", endpoint);
-        let channel = crate::channel::connect_channel(endpoint).await?;
-        let client =
-            tokenspeed_proto::token_speed_scheduler_client::TokenSpeedSchedulerClient::new(channel);
-
-        Ok(Self {
-            client,
-            trace_injector,
-        })
-    }
-
-    #[must_use]
-    pub fn with_trace_injector(mut self, trace_injector: BoxedTraceInjector) -> Self {
-        self.trace_injector = trace_injector;
-        self
-    }
-
-    /// Submit a generation request.
-    pub async fn generate(
-        &self,
-        req: tokenspeed_proto::GenerateRequest,
-    ) -> Result<AbortOnDropStream, tonic::Status> {
-        let request_id = req.request_id.clone();
-
-        let mut client = self.client.clone();
-        let mut request = Request::new(req);
-
-        if let Err(e) = self.trace_injector.inject(request.metadata_mut()) {
-            warn!("Failed to inject trace context: {}", e);
-        }
-
-        let response = client.generate(request).await?;
-
-        Ok(AbortOnDropStream::new(
-            response.into_inner(),
-            request_id,
-            self.clone(),
-        ))
-    }
-
-    pub async fn health_check(
-        &self,
-    ) -> Result<tokenspeed_proto::HealthCheckResponse, tonic::Status> {
-        debug!("Sending TokenSpeed health check request");
-        let request = Request::new(tokenspeed_proto::HealthCheckRequest {});
-        let mut client = self.client.clone();
-        let response = client.health_check(request).await?;
-        Ok(response.into_inner())
-    }
+    crate::impl_engine_client_basics!(
+        tokenspeed_proto,
+        tokenspeed_proto::token_speed_scheduler_client::TokenSpeedSchedulerClient<Channel>,
+        "TokenSpeed"
+    );
 
     pub async fn abort_request(
         &self,
@@ -138,24 +77,6 @@ impl TokenSpeedSchedulerClient {
             response.get_ref().message
         );
         Ok(())
-    }
-
-    pub async fn get_model_info(
-        &self,
-    ) -> Result<tokenspeed_proto::GetModelInfoResponse, tonic::Status> {
-        let request = Request::new(tokenspeed_proto::GetModelInfoRequest {});
-        let mut client = self.client.clone();
-        let response = client.get_model_info(request).await?;
-        Ok(response.into_inner())
-    }
-
-    pub async fn get_server_info(
-        &self,
-    ) -> Result<tokenspeed_proto::GetServerInfoResponse, tonic::Status> {
-        let request = Request::new(tokenspeed_proto::GetServerInfoRequest {});
-        let mut client = self.client.clone();
-        let response = client.get_server_info(request).await?;
-        Ok(response.into_inner())
     }
 
     pub async fn get_loads(
@@ -413,7 +334,7 @@ impl TokenSpeedSchedulerClient {
             no_stop_trim: request.no_stop_trim,
             sampling_seed: Self::completion_sampling_seed(request)?,
             n: request.n.unwrap_or(1),
-            constraint: Self::build_constraint_from_completion(request)?,
+            constraint: Self::constraint_of(completion_constraint(request)?),
             ..Default::default()
         })
     }
@@ -441,7 +362,7 @@ impl TokenSpeedSchedulerClient {
             sampling_seed: plain.sampling_seed,
             n: plain.n,
             constraint: match params {
-                Some(p) => Self::build_constraint_from_plain(p)?,
+                Some(p) => Self::constraint_of(plain_constraint(p)?),
                 None => None,
             },
             ..Default::default()
@@ -527,58 +448,19 @@ impl TokenSpeedSchedulerClient {
         }
     }
 
-    fn build_constraint_from_completion(
-        request: &CompletionRequest,
-    ) -> Result<Option<tokenspeed_proto::sampling_params::Constraint>, String> {
-        let mut constraints = Vec::new();
-        if let Some(json_schema) = &request.json_schema {
-            constraints.push(tokenspeed_proto::sampling_params::Constraint::JsonSchema(
-                json_schema.clone(),
-            ));
-        }
-        if let Some(regex) = &request.regex {
-            constraints.push(tokenspeed_proto::sampling_params::Constraint::Regex(
-                regex.clone(),
-            ));
-        }
-        if let Some(ebnf) = &request.ebnf {
-            constraints.push(tokenspeed_proto::sampling_params::Constraint::EbnfGrammar(
-                ebnf.clone(),
-            ));
-        }
-
-        match constraints.len() {
-            0 => Ok(None),
-            1 => Ok(constraints.pop()),
-            _ => Err("Multiple structured constraints are not allowed".to_string()),
-        }
-    }
-
-    fn build_constraint_from_plain(
-        params: &GenerateSamplingParams,
-    ) -> Result<Option<tokenspeed_proto::sampling_params::Constraint>, String> {
-        let mut constraints = Vec::new();
-        if let Some(json_schema) = &params.json_schema {
-            constraints.push(tokenspeed_proto::sampling_params::Constraint::JsonSchema(
-                json_schema.clone(),
-            ));
-        }
-        if let Some(regex) = &params.regex {
-            constraints.push(tokenspeed_proto::sampling_params::Constraint::Regex(
-                regex.clone(),
-            ));
-        }
-        if let Some(ebnf) = &params.ebnf {
-            constraints.push(tokenspeed_proto::sampling_params::Constraint::EbnfGrammar(
-                ebnf.clone(),
-            ));
-        }
-
-        match constraints.len() {
-            0 => Ok(None),
-            1 => Ok(constraints.pop()),
-            _ => Err("Multiple structured constraints are not allowed".to_string()),
-        }
+    /// The engine's variant for the structured constraint a request names.
+    fn constraint_of(
+        constraint: Option<(ConstraintKind, String)>,
+    ) -> Option<tokenspeed_proto::sampling_params::Constraint> {
+        constraint.map(|(kind, value)| match kind {
+            ConstraintKind::JsonSchema => {
+                tokenspeed_proto::sampling_params::Constraint::JsonSchema(value)
+            }
+            ConstraintKind::Regex => tokenspeed_proto::sampling_params::Constraint::Regex(value),
+            ConstraintKind::Ebnf => {
+                tokenspeed_proto::sampling_params::Constraint::EbnfGrammar(value)
+            }
+        })
     }
 
     fn unsigned_sampling_seed(seed: Option<i64>) -> Result<Option<u64>, String> {
@@ -824,5 +706,36 @@ mod seed_resolution_tests {
         let resolved = TokenSpeedSchedulerClient::resolve_sampling_seed(None, None)
             .expect("absent seeds should resolve");
         assert_eq!(resolved, None);
+    }
+}
+
+#[cfg(test)]
+mod constraint_mapping_tests {
+    use super::*;
+    use crate::request_fields::ConstraintKind;
+
+    /// Each constraint kind reaches the engine as its own variant; none stays none.
+    #[test]
+    fn constraint_of_maps_each_kind_to_the_engines_variant() {
+        for (kind, expected) in [
+            (
+                ConstraintKind::JsonSchema,
+                tokenspeed_proto::sampling_params::Constraint::JsonSchema("v".to_string()),
+            ),
+            (
+                ConstraintKind::Regex,
+                tokenspeed_proto::sampling_params::Constraint::Regex("v".to_string()),
+            ),
+            (
+                ConstraintKind::Ebnf,
+                tokenspeed_proto::sampling_params::Constraint::EbnfGrammar("v".to_string()),
+            ),
+        ] {
+            assert_eq!(
+                TokenSpeedSchedulerClient::constraint_of(Some((kind, "v".to_string()))),
+                Some(expected)
+            );
+        }
+        assert_eq!(TokenSpeedSchedulerClient::constraint_of(None), None);
     }
 }

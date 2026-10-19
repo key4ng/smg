@@ -101,10 +101,40 @@ and newlines the schema's grammar otherwise admits without end. LFM2.5's table b
 thirty-two, which leaves four-space indentation seven levels deep; the calls' values are never
 bounded.
 
+Where the thought is a message of its own before an answer that is another (Inkling's: the
+thought's close ends every message alike, and the next message's opener says what it is), and the
+prompt opens no thought, the tag admits the thought first, closed and the next message opened, and
+leaves the way into the answer optional (`Format::thought_message`). An engine that starts the
+grammar after its reasoning parser hands over at the answer's opener, not at the thought's close,
+and has consumed the way in when the grammar starts; one that starts at the first token writes it.
+The engine's start (`GrammarStart`) says where the grammar starts on a prompt that opens the
+thought; on one that opens none it tells the two apart only when it names the first token, when the
+way in is written outright: an engine that says it starts after its parser may gate on that parser
+whatever the prompt (one engine) or only when the request asks for reasoning (another), and the tag
+fits both. Before this, the tag wrote the way in as its `begin`, and an engine that had consumed
+the model's own opener forced it again: the answer reached the client as `<|content_text|>{...}`.
+
 Whether a thought comes before the call or the answer is the table's, not the syntax's: a table
 whose template writes the thought before every call and answer (`Format::thinks_first`) gets it
 written first, its opener, its text and its close, where the prompt has not opened it; every other
 table leaves the thought to the model, as gpt-oss's template leaves its analysis channel.
+
+Where the calls' tag starts after the thought's close, it begins with what the template writes
+there, the layout's `Message::after` of the thought: after the gate of an engine that holds the
+grammar back until its reasoning parser has seen the close (`GrammarStart::AfterReasoning`), after
+the thought the prompt closed, and after the thought a free-text prefix or a tag of the thought
+wrote. A registry table may carry that part of its layout alone (Seed-OSS's newline before every
+call, `"\n" + <seed:tool_call>` in its template), and a table without one writes the calls at once,
+as before. Besides writing what the model was trained on, this keeps the call's marker from being
+the grammar's first text: an engine that takes a call marker the model writes inside its thought
+for the thought's end (Seed-OSS rehearses the call format while thinking) would otherwise start the
+forced call there, and an engine that masks such a marker while the model reasons, when the grammar
+cannot start with it, cannot do so when the tag begins with the newline. Where the prompt leaves
+the thought closed and the engine starts the grammar at the first token, or does not say where
+(the grammar may then start at the turn's own start, where nothing stands after a close), such a
+table's tag is still the calls at once (the thought is not admitted before them: the shape MiniMax
+M3's bare-close row gives is the one that would). An answer's tag keeps the schema alone after the
+close, the engine's own constraint, which the registry's tables leave to it.
 
 A marker that is one token of the model's vocabulary (`Format::marker_tokens`: a terminal, a
 structural token, one of the syntax's own tags (`CallSyntax::tag_texts`), or a token inside one) is

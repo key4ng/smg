@@ -44,7 +44,7 @@ pub(super) async fn generate(
     submit(state, client, req, trace_headers).await
 }
 
-/// The rejection notice a refused PD decode leg owes its prefill side, so the
+/// The rejection notice a refused PD decode side owes its prefill side, so the
 /// connector releases the blocks that side pinned: what vLLM's own frontend
 /// sends, an immediately aborted one-token request under the refused id.
 struct RejectionNotice {
@@ -114,7 +114,7 @@ async fn submit(
     mut req: vllm::GenerateRequest,
     trace_headers: Option<BTreeMap<String, String>>,
 ) -> Result<BoxStream<vllm::GenerateResponse>, Status> {
-    // A PD decode leg refused before admission still owes its prefill side
+    // A PD decode side refused before admission still owes its prefill side
     // the notice: armed from the first refusal below until the engine can
     // hold the request.
     let mut notice = ArmedNotice(RejectionNotice::owed_by(client, &req));
@@ -131,7 +131,7 @@ async fn submit(
     let (registration, cancel) = state.registry.register(&request_id).inspect_err(|_| {
         // The id names a request that is still live; a notice under it would
         // reuse it (and, past an `n > 1` fan-out, get in and free the live
-        // leg's blocks).
+        // side's blocks).
         notice.disarm();
     })?;
     // Worker-side media: the request's references become engine features
@@ -186,8 +186,14 @@ async fn submit(
         }
     };
     // Queued token-work for `GetLoads`: in flight from here until the
-    // engine's first output (or the stream's end).
-    state.loads.submitted(&request_id, prompt_tokens);
+    // engine's first output (or the stream's end), on the rank the first
+    // choice went to (the choice whose first output reports the prompt).
+    let rank = subs
+        .iter()
+        .find(|sub| sub.index() == 0)
+        .or_else(|| subs.first())
+        .map_or(0, rank_of);
+    state.loads.submitted(rank, &request_id, prompt_tokens);
     let loads = LoadsGuard {
         state: Arc::clone(state),
         request_id: request_id.clone(),
@@ -217,6 +223,15 @@ async fn submit(
         _registration: registration,
         _loads: loads,
     }))
+}
+
+/// The data-parallel rank a choice's engine request went to, as the load
+/// tracker and `GetLoads` name it (an engine whose identity names no index
+/// counts as the first).
+fn rank_of(sub: &VllmGenerateStream) -> i32 {
+    sub.engine_index()
+        .and_then(|index| i32::try_from(index).ok())
+        .unwrap_or(0)
 }
 
 /// Takes the request out of the load tracker's queue when the stream ends,
@@ -251,11 +266,14 @@ struct ChoiceStream {
     pending: Option<vllm::GenerateResponse>,
     /// Whether this request's prompt tokens went into the stats counters.
     prompt_counted: bool,
-    /// A PD prefill leg's account of the media it processed, stamped on
-    /// every `Complete` of the request for the decode leg.
+    /// A PD prefill side's account of the media it processed, stamped on
+    /// every `Complete` of the request for the decode side.
     media_identity: Option<Arc<vllm::MediaIdentity>>,
     /// The request this choice belongs to, for the load tracker.
     request_id: String,
+    /// The rank this choice's engine request went to, whose figures the
+    /// load tracker credits its prompt and tokens to.
+    rank: i32,
 }
 
 impl ChoiceStream {
@@ -271,6 +289,7 @@ impl ChoiceStream {
         Self {
             media_identity,
             request_id,
+            rank: rank_of(&inner),
             state,
             inner: Some(inner),
             stops: StopMatcher::new(decoder, min_tokens),
@@ -292,9 +311,12 @@ impl ChoiceStream {
                 .stats
                 .prompt_tokens
                 .fetch_add(u64::from(prompt_tokens), Ordering::Relaxed);
-            self.state
-                .loads
-                .first_output(&self.request_id, prompt_tokens, cached_tokens);
+            self.state.loads.first_output(
+                self.rank,
+                &self.request_id,
+                prompt_tokens,
+                cached_tokens,
+            );
         }
         self.prompt_counted = true;
     }
@@ -408,9 +430,10 @@ impl Stream for ChoiceStream {
                 .stats
                 .generation_tokens
                 .fetch_add(chunk.token_ids.len() as u64, Ordering::Relaxed);
-            this.state
-                .loads
-                .generated(u32::try_from(chunk.token_ids.len()).unwrap_or(u32::MAX));
+            this.state.loads.generated(
+                this.rank,
+                u32::try_from(chunk.token_ids.len()).unwrap_or(u32::MAX),
+            );
             let matched = match this.stops.feed(&chunk.token_ids) {
                 Ok(matched) => matched,
                 Err(status) => {

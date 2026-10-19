@@ -30,7 +30,7 @@ use crate::{
 /// This is a direct extraction without architectural changes.
 pub(crate) struct ChatPreparationStage {
     /// The pools whose workers this pipeline's requests can reach (the
-    /// mode's legs): the multimodal wire dtype is resolved over them.
+    /// mode's pools): the multimodal wire dtype is resolved over them.
     wire_pools: &'static [RoutingPool],
 }
 
@@ -137,9 +137,10 @@ pub(crate) async fn prepare_chat_like(
             MediaHandling::Preprocess => multimodal::media_plan_chat(&request.messages),
         };
         // A pool whose every worker runs without a vision encoder takes no
-        // images or video: the engine admits such a request and never
-        // schedules it. Refuse it here, before any byte of media is decoded
-        // or sent.
+        // images or video (the engine admits such a request and never
+        // schedules it), and a modality no worker's engine takes is refused
+        // by the capability matrix: both are refused here, on the declared
+        // parts, before any byte of media is fetched, decoded or sent.
         multimodal::ensure_model_accepts_media(
             &ctx.components.worker_registry,
             model_id,
@@ -308,7 +309,7 @@ pub(crate) async fn prepare_chat_like(
                 // switched off, `SMG_MM_ONE_PASS_WIRE=0`): the preprocessor
                 // then writes it directly; otherwise `None`, and the write
                 // happens at assembly. Resolved over the pools of this
-                // pipeline's mode, the legs the pixels can reach, as the
+                // pipeline's mode, the pools the pixels can reach, as the
                 // selection draws them.
                 let image_wire_dtype = multimodal::mm_shared_image_wire_dtype_over(
                     &ctx.components.worker_registry,
@@ -316,12 +317,16 @@ pub(crate) async fn prepare_chat_like(
                     wire_pools,
                 );
                 // The frames decode under the destination engine's own
-                // transparency rule, resolved over the same legs as the dtype.
+                // transparency rule, resolved over the same pools as the dtype.
                 let transparency = multimodal::engine_transparency_policy(
                     &ctx.components.worker_registry,
                     model_id,
                     wire_pools,
                 );
+                // The engine's per-item bound, the smallest its workers
+                // advertise: an item above it would never be scheduled.
+                let encoder_budget =
+                    multimodal::engine_encoder_budget(&ctx.components.worker_registry, model_id);
                 match multimodal::process_multimodal_plan(
                     media_plan,
                     model_id,
@@ -332,6 +337,7 @@ pub(crate) async fn prepare_chat_like(
                     &tokenizer_source,
                     image_wire_dtype,
                     transparency,
+                    encoder_budget,
                 )
                 .await
                 {
@@ -345,13 +351,12 @@ pub(crate) async fn prepare_chat_like(
                         multimodal_intermediate = Some(output.intermediate);
                     }
                     Err(e) => {
-                        let message = multimodal::processing_failed_message(&e);
                         error!(
                             function = "ChatPreparationStage::execute",
-                            error = %message,
+                            error = %multimodal::processing_failed_message(&e),
                             "Multimodal processing failed"
                         );
-                        return Err(error::bad_request("multimodal_processing_failed", message));
+                        return Err(multimodal::processing_failed_response(&e));
                     }
                 }
             }
@@ -397,7 +402,8 @@ pub(crate) async fn prepare_chat_like(
             &request.model,
             &ctx.components.templates,
             &processed_messages.text,
-        );
+        )
+        .is_some_and(|thought| thought.open);
         let symphony_constraint = symphony::constraint(
             parser,
             &names,
@@ -428,32 +434,39 @@ pub(crate) async fn prepare_chat_like(
             (prepared, _) => prepared,
         };
 
-        let legacy_parser_needs_special_tokens = request.separate_reasoning
-            && utils::reasoning_parser_requires_special_tokens(
-                &ctx.components.reasoning_parser_factory,
-                ctx.components
-                    .parser_resolver
-                    .reasoning_parser(&request.model)
-                    .as_deref(),
-                &request.model,
-            );
+        let json_schema_constraint = tool_call_constraint
+            .as_ref()
+            .is_ok_and(|constraint| constraint.as_ref().is_some_and(|c| c.is_json_schema()));
         // A Symphony table whose markers the decoder would drop as special tokens needs them
         // kept whatever the request asks of the channels: without them the table reads neither
-        // the thought nor the calls.
-        let preserve_reasoning_special_tokens = legacy_parser_needs_special_tokens
-            || symphony::keeps_special_tokens(
-                parser,
-                &names,
-                &request.model,
-                &ctx.components.templates,
-                &tokenizer,
-            );
+        // the thought nor the calls. Where a table reads the response its markers alone decide,
+        // and no legacy reasoning parser is built to be asked; under a JSON-schema constraint no
+        // table reads (request building makes no assignment: `regular::symphony::assign`), so
+        // the legacy parsers answer for themselves, as they do where no table reads at all.
+        let preserve_reasoning_special_tokens = match symphony::keeps_special_tokens(
+            parser,
+            &names,
+            &request.model,
+            &ctx.components.templates,
+            &tokenizer,
+        ) {
+            Some(kept) if !json_schema_constraint => kept,
+            _ => {
+                request.separate_reasoning
+                    && utils::reasoning_parser_requires_special_tokens(
+                        &ctx.components.reasoning_parser_factory,
+                        ctx.components
+                            .parser_resolver
+                            .reasoning_parser(&request.model)
+                            .as_deref(),
+                        &request.model,
+                    )
+            }
+        };
 
         let skip_special_tokens = skips_special_tokens(
             request,
-            tool_call_constraint
-                .as_ref()
-                .is_ok_and(|constraint| constraint.as_ref().is_some_and(|c| c.is_json_schema())),
+            json_schema_constraint,
             preserve_reasoning_special_tokens,
         );
 

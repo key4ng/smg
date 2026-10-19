@@ -116,9 +116,9 @@ Beyond that:
   the thought, or in the content, as the tail says.
 - **Each DSML checkpoint reads with its own table.** The V4 block name and the V4.1 spaced tags are
   content under this table and this block is content under theirs; the registry reads V3.2 and
-  V3.2-Speciale here, V3.2-Exp (it writes the earlier V3.1 spelling) with no table yet, so the
-  older `deepseek31` parser, and the V4 checkpoints with theirs, and the `deepseek32` alias takes a deployment that names the older
-  parser to this table.
+  V3.2-Speciale here, V3.2-Exp (it writes the earlier V3.1 spelling) with `deepseek_v3.1`, and
+  the V4 checkpoints with theirs, and the `deepseek32` alias takes a deployment that names the
+  older parser to this table.
 - **A string value that holds a closing tag is two parameters.** DSML writes a string raw, so a
   value holding `</｜DSML｜parameter>` and another parameter's opening tag reads as two parameters,
   to the encoder's own parser (it splits at the first closing tag) and to this table alike; the
@@ -136,6 +136,59 @@ which its recorder renders through the encoder once the group has a manifest the
 harness replays them from the fixture pin, and until then nothing in this repository checks what
 they parse to; the README row says awaiting fixtures until the pin holds it. What the table
 leaves open: the recorded set, and the live reading against the engine's own server.
+
+## DeepSeek V3.1 (`deepseek_v3.1`)
+
+What the table says beyond the DSML ones:
+
+- **The same four rows around the block, another call syntax.** `calls` is the template's wrapping
+  between `<｜tool▁call▁end｜>` and the next `<｜tool▁call▁begin｜>` (the template writes nothing
+  there; whitespace dropped, anything else malformed), and `call` is one call read by the named
+  arguments assembler (`json::named_arguments`): the tool's name up to `<｜tool▁sep｜>`, taken as
+  written, then the arguments object alone. The call's close is its own terminal, so the object's
+  bytes end at the object and `<｜tool▁call▁end｜>` is wrapping; a new `<｜tool▁call▁begin｜>` before
+  the close ends the call that was open and starts the next, and the block's close ends a call
+  still open, as the DSML tables have it.
+- **A calls block ends the thought** (`reasoning + calls_open = calls`), as the V4 table reads it;
+  the template closes the thought before the block.
+- **The prompt opens or closes the thought.** The template ends the generation prompt with
+  `<｜Assistant｜><think>` when the request thinks and `<｜Assistant｜></think>` when it does not,
+  and writes no generation prompt after a tool result: the output then starts where the previous
+  turn's `<｜Assistant｜>` leads, which is content once its block has closed. The turn opener is
+  `<｜Assistant｜>`, so a marker quoted in an earlier turn moves nothing.
+- **The recorded set holds no call.** The template concatenates a call's arguments as a string,
+  and bellwether's corpus holds them as an object, so the recorder refused every call case of
+  `deepseek-v3.1` (and of `deepseek-v3.2-exp`, the same spelling): the content sets replay; the
+  calls stand on the turns the template renders with string arguments, held in the module's tests
+  at every cut, as the V4 table stands on its encoder's turns.
+
+What the table leaves open: a forced call's tag (`Format::grammar` writes none for the named
+arguments syntax beyond what the Mistral table gets), and the live reading on an engine, owed with
+the family's weights.
+
+## DeepSeek V3 (`deepseek_v3`)
+
+The spelling before V3.1's, the gateway's older `deepseek` parser's: no thought in the template
+(the table reads one all the same, below), the call's opener
+is `<｜tool▁call▁begin｜>function<｜tool▁sep｜>` (the call's type before the separator, which the
+template writes from the message and every message writes as `function`), the name runs to the
+`json` fence the template opens on the next line, and the fence's close with `<｜tool▁call▁end｜>`
+is the terminal that leaves the call. Beyond that:
+
+- **The newline before the fence's close is wrapping**, dropped as whitespace after the object, and
+  so is the newline the template writes before every call after the first. A fence closed without
+  `<｜tool▁call▁end｜>` right after it is not a terminal: the bytes stay in the call as malformed
+  text until the next opener or the block's close, as the older parser's pattern would not have
+  read them either.
+- **A thought the template never writes.** V3's template has no thinking switch, yet the table
+  keeps the thought rows (`<think>` opens it, `</think>` closes it, a calls block ends it) because
+  the gateway's older `deepseek` parser served checkpoints that share the call spelling and write
+  a thought: DeepSeek R1-0528, paired with the `deepseek_r1` reasoning parser. The `deepseek` alias
+  takes that deployment to this table, and the thought must never land in the content. The cost
+  is a V3-0324 output that spells `<think>` itself, which the reference keeps as content and the
+  table reads as a thought; the recorded sets hold none.
+- **The recorded set holds no call**, for the reason given under V3.1; the calls stand on the turns
+  the template renders, held in the module's tests at every cut.
 
 ## GLM 4.5 and 4.6 (`glm4`)
 
@@ -231,6 +284,17 @@ What the table says beyond the others:
 - **The turn's end token is ignored.** The template writes `<|content_model_end_sampling|>`
   after the turn; an engine that passes it through has it dropped wherever it stands, inside
   a message's header or its call included, where its bytes keep their place.
+- **A JSON answer's tag leaves the way in to the engine.** The thought is a message of its own
+  and the answer another, so an engine that starts a grammar after its reasoning parser hands
+  over at `<|content_text|>`, not at the thought's `<|end_message|>`, which ends every message
+  alike. `Format::answer_grammar` writes the thought the model may write first (its message,
+  closed, and `<|message_model|>`), then `<|content_text|>` as optional, unless the engine says
+  it starts at the first token, then the schema and `<|end_message|>`: an engine that consumed the
+  model's own marker writes the JSON at once, one that starts before the thought writes the
+  marker itself. Before this, the tag's `begin` wrote the marker again after the model's own on
+  such an engine, and the answer came back as `<|content_text|>{...}`; the table reads that second
+  marker as the answer's text, where no row leads, and says so with a `Malformed` event of no
+  bytes (`MarkerOutOfPlace`), so a reader counts it.
 - **A forced call's tag is the gateway's.** `Format::grammar` writes the tag the gateway's old
   Inkling parser hand-writes: the call marker triggers it inside whatever message the model is
   writing, the first one included, then `{"name":"NAME","args":`, the schema, `}` and
@@ -241,6 +305,17 @@ What the table says beyond the others:
 - **The group is one template.** Inkling, Inkling-Small and Inkling-NVFP4 ship the same chat
   template byte for byte (one sha256 at the three checkpoints' recorded or current revisions), so
   the three read with the one table and the recorded `inkling` set stands for the group.
+- **A request without tools reads the same framing.** The variant the gateway reads such a
+  request with (`Format::without_calls`) turns the message header into content, as no syntax
+  reads a call there, keeps the ended message a wrapper (the space between two messages, whose
+  whitespace is the template's), and keeps every marker dropped: the header is the state the turn
+  starts in and returns to, so its four markers frame the thought and the answer as much as a
+  call, and are not a call's own; the variant without the thought made of it, for a request that
+  keeps the reasoning in the content, drops them too, as that variant does with tools. The
+  thought and the answer read as with tools; a call the model writes anyway comes back as content
+  between the dropped framing (`search<|content_invoke_tool_json|>{...}`), as the legacy path
+  leaves it. Before this, the variant showed `<|end_message|><|message_model|><|content_text|>`
+  and the answer's `<|end_message|>` as content on every request without tools.
 
 What the table leaves out, for want of fixtures: image and audio messages, which the template writes
 for the user and never for the model; and the text-mode invocation, `<|content_invoke_tool_text|>`,
@@ -281,23 +356,96 @@ list syntax, which no recorded group writes.
 
 What the table says beyond the others:
 
-- **One state, no markers, an object or a list.** As `xlam`, the output starts in the arguments
+- **One state, an object, several, or a list.** As `xlam`, the output starts in the arguments
   state and the assembler decides at the first byte that is not whitespace; unlike `xlam`, a `{`
   there is one call alone (`json::list::Assembler::object_or_list`), whose object reads as a
-  list's object does, `arguments`, `parameters` or `args` naming the arguments. What follows the
-  object reads as what follows a list's `]`: whitespace that ends the output is the template's
-  wrapping, dropped; text is malformed, with the whitespace before and between its words, since
-  a model that explains its JSON in a sentence wrote that sentence and the reference keeps it.
+  list's object does, `arguments`, `parameters` or `args` naming the arguments. After the object
+  a `;` and another object is another call, the `;` and the whitespace around it the template's
+  wrapping: Llama 3.1 writes its parallel calls so, `{…}; {…}`, and the engines' own readers of
+  the family split on the `;`. Anything else after the object reads as what follows a list's
+  `]`: whitespace that ends the output is the template's wrapping, dropped; text is malformed,
+  with the whitespace before and between its words, since a model that explains its JSON in a
+  sentence wrote that sentence and the reference keeps it; so is a `;` that no object follows.
+- **The family's call token opens the output, or does not.** Llama 3.1's template renders a call
+  as the bare object, but its models write the call behind `<|python_tag|>`, the token the
+  template reserves for a tool call (`CallSyntax::JsonAlone` names it): at the output's start,
+  after whitespace or not, the token is dropped as the template's wrapping and the first byte
+  after it decides as the output's first did, so an output with the token and one without read
+  the same. A delta that ends inside the token is held until the next byte decides. The token is
+  read at the start only, as the family's own readers read it: after prose it is text, whole with
+  the prose, and after the object it is text after the arguments. The gateway's older `llama`
+  parser, whose name the table answers to, took the token anywhere in the text and the prose
+  before it as content; that shape reads as content whole here, by the rule that no table scans
+  for a marker, and a served Llama 3.1 Instruct checkpoint wrote the token first on every output
+  that had it (248 of 248 in the recorded set). A request without tools reads with the table
+  without its calls, and then the output is the text it was, token included.
 - **Prose before the JSON is content, whole.** The gateway's older `json` parser searches the
   output for the first `{` or `[`; this table does not, as no other table scans for a marker.
 - **A forced call is the list.** `Format::grammar` writes the `xlam` list, as the older parser's
-  forced calls were written.
+  forced calls were written; the call token is not in the grammar, since the template never
+  renders it.
 
-What the table leaves open: the format is Llama 3.1's own template's, which six recorded groups
-write (Nemotron Ultra 253B CPT, the UltraLong 1M, 2M and 4M, Safety Guard 8B v3, the 70B Reward
-Principle): one call alone, `parameters` naming the arguments, and never a list, content beside a
-call or a thought, since the template refuses them; the list and the wrapping after an object rest
-on the unit tests until a group writes them.
+What the table leaves open: six recorded groups write the format (Nemotron Ultra 253B CPT, the
+UltraLong 1M, 2M and 4M, Safety Guard 8B v3, the 70B Reward Principle), as the template renders
+it: one call alone, `parameters` naming the arguments, and never a list, content beside a call or a
+thought, since the template refuses them; the call token and the `;` between calls are what a
+served Llama 3.1 Instruct checkpoint writes, held verbatim in the table's unit tests, and the list
+and the wrapping after an object rest on the unit tests until a group writes them.
+
+## Llama 4 (`llama4`)
+
+The template writes the turn as the content, if the message has one, then the calls as a Python
+list, `[get_weather(city="Paris"), get_stock_price()]`, with nothing between the content and the
+list and nothing after it; no thought. What the table says beyond the others:
+
+- **One state, no markers, the list bare in the turn.** As `xlam` and `json`, the output starts in
+  the arguments state; the pythonic assembler reads the turn bare (`pythonic::Assembler::bare`).
+  A turn that starts, after whitespace alone, with a `[` that a name and its `(` follow is the
+  list, read as it arrives, the whitespace its wrapping; after the list's `]` whitespace is
+  dropped and anything else malformed. A turn that starts with anything else is content, and a
+  `[name(` after that content, the shape the template renders for a message that holds both
+  (`Let me check.[get_weather(city="Paris")]`), is held until the `]` that closes it and read as
+  its calls only when the whole is a well-formed list of calls with keyword arguments to tools
+  the request declares: code holds `[name(` of its own (`lim(h→0)[f(a+h) - f(a)]/h`,
+  `movies[Math.floor(…)]`, `[set(range(10)) for _ in range(3)]`, `[Authorize(Roles = "Manager")]`,
+  `ingredients[exotic_ingredient.lower()]`: twenty-two of the 5,841 content cases a 1-in-100
+  sample of the recorded sets holds), and a list opened there as it arrives took those brackets
+  for calls; held, checked whole and held to the request's tools, every one of them is content,
+  and the recorded messages with content and calls read as the reference has them. A `[` that no
+  call follows (`[1]`, `[Note]`, a markdown link, a list of
+  names) is content, and so is a list the stream's end cut before its `]`, since no call began.
+  The engine's own reader for the family opens the list at the output's start alone; where the
+  model writes content before its list, that reader gives content only and this table the calls.
+- **Every value is a quoted string in the template, so the quotes carry no type.** The template
+  writes each argument as `"%s"` of its value: `days="3"`, `detailed="True"`, a list or an object
+  as Python's repr inside the quotes (`tags="['a', 'b']"`). The assembler reads a quoted value by
+  the kind the request's tool declares for the parameter, as the tagged tables read a value's
+  text (`Dialect::LLAMA4`, `Values::Quoted`): a declared string stays the string, digits or not;
+  an integer, an array, an object come back as what the text spells; a parameter no tool
+  declares reads by its text, a number or a word as what it is and anything else as the string.
+  The text between the quotes is the value's characters as they are: the template decodes no
+  escape, so a backslash and an `r` in a value stay those two characters (the recorded patches
+  are full of them), and the table reads them so. A value the model writes bare (`days=3`,
+  `detailed=False`, `city='Paris'`), the spelling its model card and the family's parsers take,
+  reads as Python's, a single-quoted string with its escapes. The structural tags write Python's
+  values, the spelling the model is told to write.
+- **A quote inside a quoted value is the template's loss.** The template does not escape a `"`
+  inside a string it quotes, so the bytes it writes for such a value cannot be read back by any
+  reader, this one included; the recorded sets hold a few such cases (five in a hundred thousand
+  of Scout's), and the corpus replay counts them apart, by the reference that holds the quote,
+  rather than against the table. A string that holds a newline or a backslash reads as written.
+- **`<|python_start|>` and `<|python_end|>` are wrapping wherever they stand.** The family's
+  earlier template wrote a tool turn's content between them, and the model may write them around
+  its code or its list; the table ignores both terminals, so the text between them reads as what
+  it is, content or the list.
+- **The prompt ends at the turn's opener.** `<|header_start|>assistant<|header_end|>` and two
+  newlines; after a tool result the previous turn's list stands in the prompt, and the replay
+  starts at the last opener, in content, where the template puts the answer.
+
+What the table leaves open: a live reading on an engine (owed with the family's weights); the
+base checkpoints' template (`llama-4-scout-17b-16e`), which writes JSON objects back to back behind
+the python markers, another format no table reads yet; and the structural tag of a forced call,
+which writes the bare list as the `xlam` table's does and is not yet proven on an engine.
 
 ## The forced call (`forced`)
 
@@ -306,9 +454,10 @@ names a function and whose constraint is the JSON schema the older path builds f
 function's `parameters`), so the whole output is that function's arguments, with no marker and no
 name in it. The name comes from the request (`Declared::forcing`), and `ToolCallStart` carries it
 with no source byte of its own. The value streams through `json::Arguments` (`json::forced` drives
-it): the whitespace before it is dropped, a fragment for every byte that keeps it a JSON prefix,
-malformed from the first that does not, and the call's end where the value is whole or where the
-stream ends; the engine reports text after a whole value as text after the object. A required call
+it): the whitespace before it is dropped, a fragment for every byte, a JSON prefix until a
+`Malformed { InvalidArguments }` event of no bytes says where it stopped being one, and the call's
+end where the value is whole or where the stream ends; the engine reports text after a whole value
+as text after the object. A required call
 under the same path is a list of `{"name": …, "parameters": …}` objects, which the `json` table
 reads.
 

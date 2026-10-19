@@ -1,5 +1,3 @@
-use std::{future::Future, pin::Pin};
-
 use openai_protocol::{
     chat::ChatCompletionRequest, completion::CompletionRequest, generate::GenerateRequest,
     messages::CreateMessageRequest, responses::ResponsesRequest,
@@ -9,8 +7,11 @@ use tonic::{transport::Channel, Request};
 use tracing::{debug, warn};
 
 use crate::{
-    request_fields::{response_format_schema, stop_strings, PlainSampling},
-    AbortOnDropClient, BoxedTraceInjector,
+    request_fields::{
+        completion_constraint, plain_constraint, response_format_schema, stop_strings,
+        ConstraintKind, PlainSampling,
+    },
+    BoxedTraceInjector,
 };
 
 // Include the generated protobuf code
@@ -31,47 +32,43 @@ pub struct VllmEngineClient {
     trace_injector: BoxedTraceInjector,
 }
 
-impl AbortOnDropClient for VllmEngineClient {
-    fn abort_for_drop(
-        self,
-        request_id: String,
-    ) -> Pin<Box<dyn Future<Output = Result<(), tonic::Status>> + Send>> {
-        Box::pin(async move {
-            self.abort_request(request_id, "Stream dropped".to_string())
-                .await
-        })
-    }
-}
+crate::impl_abort_for_drop_with_reason!(VllmEngineClient);
 
 impl VllmEngineClient {
-    crate::impl_engine_client_basics!(proto::vllm_engine_client::VllmEngineClient<Channel>, "vLLM");
+    crate::impl_engine_client_basics!(
+        proto,
+        proto::vllm_engine_client::VllmEngineClient<Channel>,
+        "vLLM"
+    );
 
-    /// Submit a generation request (returns auto-aborting streaming response)
-    ///
-    /// The returned stream automatically sends an abort request when dropped,
-    /// ensuring proper cleanup even if the HTTP client disconnects or an error occurs.
-    /// Call `mark_completed()` on the stream after successful completion to prevent
-    /// unnecessary abort RPCs.
-    pub async fn generate(
-        &self,
-        req: proto::GenerateRequest,
-    ) -> Result<AbortOnDropStream, tonic::Status> {
-        let request_id = req.request_id.clone();
-        let mut client = self.client.clone();
-        let mut request = Request::new(req);
-
-        // Inject W3C trace context into gRPC metadata for distributed tracing
-        if let Err(e) = self.trace_injector.inject(request.metadata_mut()) {
-            warn!("Failed to inject trace context: {}", e);
-        }
-
-        let response = client.generate(request).await?;
-
-        Ok(AbortOnDropStream::new(
-            response.into_inner(),
+    /// The request every builder of this client sends: the tokenized input, the
+    /// sampling, the stream flag and the multimodal inputs. The fields no
+    /// builder sets are named here, once.
+    fn tokenized_request(
+        request_id: String,
+        original_text: String,
+        token_ids: Vec<u32>,
+        sampling_params: proto::SamplingParams,
+        stream: bool,
+        mm_inputs: Option<proto::MultimodalInputs>,
+    ) -> proto::GenerateRequest {
+        proto::GenerateRequest {
             request_id,
-            self.clone(),
-        ))
+            input: Some(proto::generate_request::Input::Tokenized(
+                proto::TokenizedInput {
+                    original_text,
+                    input_ids: token_ids,
+                },
+            )),
+            sampling_params: Some(sampling_params),
+            stream,
+            kv_transfer_params: None,
+            kv_transfer_params_json: None,
+            data_parallel_rank: None,
+            mm_inputs,
+            media_refs: None,
+            extra_mm_inputs: Vec::new(),
+        }
     }
 
     /// Abort a request
@@ -125,27 +122,14 @@ impl VllmEngineClient {
         let sampling_params =
             Self::build_grpc_sampling_params_from_chat(body, tool_call_constraint)?;
 
-        let mm_inputs = multimodal_inputs;
-
-        let grpc_request = proto::GenerateRequest {
+        Ok(Self::tokenized_request(
             request_id,
-            input: Some(proto::generate_request::Input::Tokenized(
-                proto::TokenizedInput {
-                    original_text: processed_text,
-                    input_ids: token_ids,
-                },
-            )),
-            sampling_params: Some(sampling_params),
-            stream: body.stream,
-            kv_transfer_params: None,
-            kv_transfer_params_json: None,
-            data_parallel_rank: None,
-            mm_inputs,
-            media_refs: None,
-            extra_mm_inputs: Vec::new(),
-        };
-
-        Ok(grpc_request)
+            processed_text,
+            token_ids,
+            sampling_params,
+            body.stream,
+            multimodal_inputs,
+        ))
     }
 
     /// Build a basic GenerateRequest from the vLLM spec GenerateRequest
@@ -158,25 +142,14 @@ impl VllmEngineClient {
         let sampling_params =
             Self::build_sampling_params_from_plain(body.sampling_params.as_ref())?;
 
-        let grpc_request = proto::GenerateRequest {
+        Ok(Self::tokenized_request(
             request_id,
-            input: Some(proto::generate_request::Input::Tokenized(
-                proto::TokenizedInput {
-                    original_text: original_text.unwrap_or_default(),
-                    input_ids: token_ids,
-                },
-            )),
-            sampling_params: Some(sampling_params),
-            stream: body.stream,
-            kv_transfer_params: None,
-            kv_transfer_params_json: None,
-            data_parallel_rank: None,
-            mm_inputs: None,
-            media_refs: None,
-            extra_mm_inputs: Vec::new(),
-        };
-
-        Ok(grpc_request)
+            original_text.unwrap_or_default(),
+            token_ids,
+            sampling_params,
+            body.stream,
+            None,
+        ))
     }
 
     /// Build a GenerateRequest from ResponsesRequest (OpenAI Responses API)
@@ -193,25 +166,14 @@ impl VllmEngineClient {
         // Build sampling params from ResponsesRequest
         let sampling_params = Self::build_grpc_sampling_params_from_responses(body, constraint)?;
 
-        let grpc_request = proto::GenerateRequest {
+        Ok(Self::tokenized_request(
             request_id,
-            input: Some(proto::generate_request::Input::Tokenized(
-                proto::TokenizedInput {
-                    original_text: processed_text,
-                    input_ids: token_ids,
-                },
-            )),
-            sampling_params: Some(sampling_params),
-            stream: body.stream.unwrap_or(false),
-            kv_transfer_params: None,
-            kv_transfer_params_json: None,
-            data_parallel_rank: None,
-            mm_inputs: None,
-            media_refs: None,
-            extra_mm_inputs: Vec::new(),
-        };
-
-        Ok(grpc_request)
+            processed_text,
+            token_ids,
+            sampling_params,
+            body.stream.unwrap_or(false),
+            None,
+        ))
     }
 
     /// Build gRPC SamplingParams from ChatCompletionRequest
@@ -383,25 +345,14 @@ impl VllmEngineClient {
         let sampling_params =
             Self::build_grpc_sampling_params_from_messages(body, tool_call_constraint)?;
 
-        let grpc_request = proto::GenerateRequest {
+        Ok(Self::tokenized_request(
             request_id,
-            input: Some(proto::generate_request::Input::Tokenized(
-                proto::TokenizedInput {
-                    original_text: processed_text,
-                    input_ids: token_ids,
-                },
-            )),
-            sampling_params: Some(sampling_params),
-            stream: body.stream.unwrap_or(false),
-            kv_transfer_params: None,
-            kv_transfer_params_json: None,
-            data_parallel_rank: None,
-            mm_inputs: multimodal_inputs,
-            media_refs: None,
-            extra_mm_inputs: Vec::new(),
-        };
-
-        Ok(grpc_request)
+            processed_text,
+            token_ids,
+            sampling_params,
+            body.stream.unwrap_or(false),
+            multimodal_inputs,
+        ))
     }
 
     /// Build gRPC SamplingParams from CreateMessageRequest
@@ -444,25 +395,14 @@ impl VllmEngineClient {
     ) -> Result<proto::GenerateRequest, String> {
         let sampling_params = Self::build_grpc_sampling_params_from_completion(body)?;
 
-        let grpc_request = proto::GenerateRequest {
+        Ok(Self::tokenized_request(
             request_id,
-            input: Some(proto::generate_request::Input::Tokenized(
-                proto::TokenizedInput {
-                    original_text,
-                    input_ids: token_ids,
-                },
-            )),
-            sampling_params: Some(sampling_params),
-            stream: body.stream,
-            kv_transfer_params: None,
-            kv_transfer_params_json: None,
-            data_parallel_rank: None,
-            mm_inputs: None,
-            media_refs: None,
-            extra_mm_inputs: Vec::new(),
-        };
-
-        Ok(grpc_request)
+            original_text,
+            token_ids,
+            sampling_params,
+            body.stream,
+            None,
+        ))
     }
 
     /// Build an EmbedRequest for embedding/classify endpoints
@@ -508,7 +448,7 @@ impl VllmEngineClient {
 
         let logprobs = request.logprobs.map(|v| v.min(20) as i32);
 
-        let constraint = Self::build_single_constraint_from_completion(request)?;
+        let constraint = Self::constraint_of(completion_constraint(request)?);
 
         Ok(proto::SamplingParams {
             temperature: request.temperature,
@@ -536,50 +476,15 @@ impl VllmEngineClient {
         })
     }
 
-    fn build_single_constraint_from_completion(
-        request: &CompletionRequest,
-    ) -> Result<Option<proto::sampling_params::Constraint>, String> {
-        let mut constraints = Vec::new();
-        if let Some(json_schema) = &request.json_schema {
-            constraints.push(proto::sampling_params::Constraint::JsonSchema(
-                json_schema.clone(),
-            ));
-        }
-        if let Some(regex) = &request.regex {
-            constraints.push(proto::sampling_params::Constraint::Regex(regex.clone()));
-        }
-        if let Some(ebnf) = &request.ebnf {
-            constraints.push(proto::sampling_params::Constraint::Grammar(ebnf.clone()));
-        }
-
-        match constraints.len() {
-            0 => Ok(None),
-            1 => Ok(constraints.pop()),
-            _ => Err("Multiple structured constraints are not allowed".to_string()),
-        }
-    }
-
-    fn build_single_constraint_from_plain(
-        params: &GenerateSamplingParams,
-    ) -> Result<Option<proto::sampling_params::Constraint>, String> {
-        let mut constraints = Vec::new();
-        if let Some(json_schema) = &params.json_schema {
-            constraints.push(proto::sampling_params::Constraint::JsonSchema(
-                json_schema.clone(),
-            ));
-        }
-        if let Some(regex) = &params.regex {
-            constraints.push(proto::sampling_params::Constraint::Regex(regex.clone()));
-        }
-        if let Some(ebnf) = &params.ebnf {
-            constraints.push(proto::sampling_params::Constraint::Grammar(ebnf.clone()));
-        }
-
-        match constraints.len() {
-            0 => Ok(None),
-            1 => Ok(constraints.pop()),
-            _ => Err("Multiple structured constraints are not allowed".to_string()),
-        }
+    /// The engine's variant for the structured constraint a request names.
+    fn constraint_of(
+        constraint: Option<(ConstraintKind, String)>,
+    ) -> Option<proto::sampling_params::Constraint> {
+        constraint.map(|(kind, value)| match kind {
+            ConstraintKind::JsonSchema => proto::sampling_params::Constraint::JsonSchema(value),
+            ConstraintKind::Regex => proto::sampling_params::Constraint::Regex(value),
+            ConstraintKind::Ebnf => proto::sampling_params::Constraint::Grammar(value),
+        })
     }
 
     fn build_sampling_params_from_plain(
@@ -609,7 +514,7 @@ impl VllmEngineClient {
                 .sampling_seed
                 .map(|seed| ((seed ^ (seed >> 32)) as u32) as i32),
             constraint: match params {
-                Some(p) => Self::build_single_constraint_from_plain(p)?,
+                Some(p) => Self::constraint_of(plain_constraint(p)?),
                 None => None,
             },
             ..Default::default()
@@ -986,4 +891,30 @@ mod tests {
     }
 
     // TODO: ModelInfo not in current proto - skip test
+
+    /// Each constraint kind reaches the engine as its own variant; none stays none.
+    #[test]
+    fn constraint_of_maps_each_kind_to_the_engines_variant() {
+        use crate::request_fields::ConstraintKind;
+        for (kind, expected) in [
+            (
+                ConstraintKind::JsonSchema,
+                proto::sampling_params::Constraint::JsonSchema("v".to_string()),
+            ),
+            (
+                ConstraintKind::Regex,
+                proto::sampling_params::Constraint::Regex("v".to_string()),
+            ),
+            (
+                ConstraintKind::Ebnf,
+                proto::sampling_params::Constraint::Grammar("v".to_string()),
+            ),
+        ] {
+            assert_eq!(
+                VllmEngineClient::constraint_of(Some((kind, "v".to_string()))),
+                Some(expected)
+            );
+        }
+        assert_eq!(VllmEngineClient::constraint_of(None), None);
+    }
 }

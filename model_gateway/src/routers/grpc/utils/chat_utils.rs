@@ -682,7 +682,7 @@ pub(crate) fn filter_chat_request_by_tool_choice(
         if let Some(filtered_tools) = filter_tools_by_tool_choice(tools, body.tool_choice.as_ref())
         {
             let mut filtered_body = body.clone();
-            filtered_body.tools = Some(filtered_tools);
+            filtered_body.tools = Some(filtered_tools.into());
             return std::borrow::Cow::Owned(filtered_body);
         }
     }
@@ -1082,6 +1082,47 @@ pub(crate) fn generate_tool_call_id(
         // Kimi-K2 format: functions.{name}:{global_index}.
         format!("functions.{}:{}", tool_name, history_count + tool_index)
     }
+}
+
+/// The completion API's finish reason from the engine's: a local stop beats
+/// the engine's reason (which is "length" when stop strings are enforced
+/// gateway-side rather than by the backend); the API's words `stop`,
+/// `length` and `content_filter` pass, and so do the engines' own signals
+/// `abort`, `error` and `failed`, which the chat paths pass through too and
+/// clients read as the failure they are; each as a plain word or as a JSON
+/// object's `type`. Anything else (an empty reason, an unmapped type, an
+/// unrecognized word) is `stop`, logged once with the raw value. One table
+/// for the streamed and the non-streamed completion.
+pub(crate) fn completion_finish_reason(local_stop: bool, engine: &str) -> &'static str {
+    if local_stop {
+        return "stop";
+    }
+    let known = |word: &str| -> Option<&'static str> {
+        match word {
+            "stop" => Some("stop"),
+            "length" => Some("length"),
+            "content_filter" => Some("content_filter"),
+            "abort" => Some("abort"),
+            "error" => Some("error"),
+            "failed" => Some("failed"),
+            _ => None,
+        }
+    };
+    if let Some(reason) = known(engine) {
+        return reason;
+    }
+    if let Ok(json) = serde_json::from_str::<Value>(engine) {
+        if let Some(reason) = json.get("type").and_then(Value::as_str).and_then(known) {
+            return reason;
+        }
+    }
+    if !engine.is_empty() {
+        warn!(
+            unexpected_finish_reason = engine,
+            "Unrecognized finish_reason from backend, defaulting to stop"
+        );
+    }
+    "stop"
 }
 
 /// Parse finish_reason string into GenerateFinishReason enum
@@ -1793,7 +1834,8 @@ mod tests {
         let names = |request: &ChatCompletionRequest| -> Vec<String> {
             request
                 .tools
-                .iter()
+                .as_deref()
+                .into_iter()
                 .flatten()
                 .map(|tool| tool.function.name.clone())
                 .collect()
@@ -1866,7 +1908,7 @@ mod tests {
         );
         assert!(matches!(rendered, std::borrow::Cow::Borrowed(_)));
         assert_eq!(
-            rendered.tools.as_ref().map(Vec::len),
+            rendered.tools.as_deref().map(<[_]>::len),
             Some(1),
             "the tool declaration stays for the renderer to write"
         );
@@ -2685,6 +2727,35 @@ mod tests {
             assert!(message.contains("served-model"), "{message}");
             assert!(message.contains(reason), "{message}");
             assert!(!message.contains("/models/secret"), "{message}");
+        }
+    }
+
+    /// One table for both completion paths: the API's words and the engines'
+    /// own signals pass, as a word or as a JSON `type`; anything else is
+    /// "stop"; a local stop beats all.
+    #[test]
+    fn the_completion_finish_reason_is_one_table() {
+        for (local_stop, engine, expected) in [
+            (false, "", "stop"),
+            (false, "stop", "stop"),
+            (false, "length", "length"),
+            (false, "content_filter", "content_filter"),
+            (false, r#"{"type":"stop"}"#, "stop"),
+            (false, r#"{"type":"length","length":7}"#, "length"),
+            (false, r#"{"type":"content_filter"}"#, "content_filter"),
+            (false, r#"{"type":"abort"}"#, "abort"),
+            (false, "abort", "abort"),
+            (false, "error", "error"),
+            (false, "failed", "failed"),
+            (false, r#"{"type":"timeout"}"#, "stop"),
+            (false, "whatever", "stop"),
+            (true, "length", "stop"),
+        ] {
+            assert_eq!(
+                completion_finish_reason(local_stop, engine),
+                expected,
+                "local_stop={local_stop} engine={engine:?}"
+            );
         }
     }
 }

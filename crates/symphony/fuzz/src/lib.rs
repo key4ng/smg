@@ -14,11 +14,15 @@
 //!   their ids and arguments and the finish (both replays count their call ids from one nonce,
 //!   as one request's engine does);
 //! - well-formedness: one start and one end per call, arguments only between them and a valid
-//!   JSON prefix after every fragment, reasoning text only inside a region, one `Finish` that
+//!   JSON prefix after every fragment until a `Malformed { InvalidArguments }` event of no bytes
+//!   says where the arguments stopped being one (from there every fragment is the model's bytes
+//!   as written), reasoning text only inside a region, one `Finish` that
 //!   counts the calls; a fragment of the arguments that closes a string, writes a member under an
 //!   empty key or writes an empty string carries the output bytes that wrote it (a reader makes
 //!   no byte up); and a call that ended, at its own terminal or at the stream's end, has
-//!   arguments that are whole JSON, unless the engine said `Malformed` while the call was open;
+//!   arguments that are whole JSON, unless the engine said `Malformed` while the call was open
+//!   (three names for the breach: `empty-arguments`, `tolerated-json`, `whole-json`, so that a
+//!   run allows a class already reported and still catches the others);
 //! - the adapters render any event sequence without a panic, and the Chat Completions stream,
 //!   concatenated, says what the whole message says.
 //!
@@ -212,6 +216,18 @@ fn plan(text: &str, sizes: &[usize]) -> Vec<usize> {
 /// A decoded case, checked.
 pub fn run(data: &[u8], table: Option<Table>) {
     check(&decode(data, table));
+}
+
+/// The events of `case` replayed with its output cut at `cuts` (none for the whole replay,
+/// `case.cuts` for the pieces): what a reader of the stream sees, for reading an artifact
+/// outside the shape checks (`explain --events`).
+///
+/// # Panics
+///
+/// As a replay does: a `feed` that fails is the `feed-failed` breach, and an engine that panics
+/// panics here.
+pub fn events(case: &Case, cuts: &[usize]) -> Vec<Event> {
+    replay(case, cuts).events
 }
 
 /// Replays `case` whole and in its pieces and asserts the contract on both.
@@ -559,7 +575,12 @@ fn closes_an_open_string(so_far: &str, fragment: &str) -> bool {
 /// value once the key's own text is taken out: whitespace and the separators `=`, `:` and `,`
 /// alone (`city=`). The model's own empty value leaves its quotes or its tags in the source
 /// (`city=""`, `<parameter=city></parameter>`), and the JSON syntaxes' source is the member itself.
+/// A trailing `}`, `,` or `]` (`{"city": ""}`, `"city": "",`, `"tags": [""]`) is set aside before
+/// the string is judged.
 fn made_up_empty_string(json: &str, source: &str) -> bool {
+    // A whole member may close its object or list or carry the next separator (`{"key": ""}`,
+    // `"key": "",`, `"tags": [""]`): the empty string is judged without that trailing byte.
+    let json = json.strip_suffix(['}', ',', ']']).unwrap_or(json);
     if !json.ends_with("\"\"") {
         return false;
     }
@@ -581,6 +602,56 @@ fn made_up_empty_string(json: &str, source: &str) -> bool {
     }
 }
 
+/// Whether `text` is one whole JSON value: the syntax, as a client's reader takes it, not a
+/// reader's number range. `serde_json`'s `Value` refuses `9.99e999999` for its range alone, a
+/// number JSON writes and a client reads as it can; `IgnoredAny` walks the same grammar (the
+/// brackets and commas, a word spelled whole, a number's digits, decimals and exponent, the
+/// escapes, a raw control character refused inside a string) without converting the number.
+/// It takes a `\u` escape of any code point, a lone surrogate included, as the grammar does;
+/// a reader that drops a byte of the output fails conservation before it reaches this judge.
+fn whole_json(text: &str) -> bool {
+    serde_json::from_str::<serde::de::IgnoredAny>(text).is_ok()
+}
+
+/// Whether `text` has the shape of one whole JSON value, whatever JSON says of its tokens: an
+/// object or a list opened at the front and closed at the end, every bracket outside a string's
+/// contents matched; or one scalar token, a string that is closed, a number or a word. The shape
+/// the prefix judge took as whole when the call ended; whether JSON takes the tokens inside is
+/// [`whole_json`]'s question, and the two apart name the breach.
+fn closed_structure(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() || (text.starts_with(['{', '[']) && !text.ends_with(['}', ']'])) {
+        return false;
+    }
+    let mut open: Vec<char> = Vec::new();
+    let mut inside = false;
+    let mut escaped = false;
+    for c in text.chars() {
+        if inside {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                inside = false;
+            }
+        } else {
+            match c {
+                '"' => inside = true,
+                '{' | '[' => open.push(c),
+                '}' | ']' => {
+                    let opener = if c == '}' { '{' } else { '[' };
+                    if open.pop() != Some(opener) {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    open.is_empty() && !inside
+}
+
 /// Whether `text` is a JSON prefix the prefix parser takes whole.
 fn valid_json_prefix(text: &str) -> bool {
     matches!(PartialJson::default().parse(text, true), Ok((_, consumed)) if consumed == text.len())
@@ -592,6 +663,9 @@ fn check_well_formed(case: &Case, which: &str, replayed: &Replayed) {
     let mut ended: Vec<u32> = Vec::new();
     let mut arguments: Vec<(u32, String)> = Vec::new();
     let mut malformed_inside: Vec<u32> = Vec::new();
+    // The calls whose arguments stopped being JSON, said by a `Malformed { InvalidArguments }`
+    // event of no bytes while the call was open: from there the fragments are the model's bytes.
+    let mut broke: Vec<u32> = Vec::new();
     let mut reasoning_open = false;
     let mut finished = false;
     for (at, event) in replayed.events.iter().enumerate() {
@@ -665,12 +739,21 @@ fn check_well_formed(case: &Case, which: &str, replayed: &Replayed) {
                         },
                     );
                     so_far.push_str(json);
-                    breach("json-prefix", valid_json_prefix(so_far), || {
-                        format!(
-                            "{}: the arguments so far, {so_far:?}, are no valid JSON prefix",
-                            place()
-                        )
-                    });
+                    if broke.contains(index) {
+                        breach("verbatim-after-break", json == &source.text, || {
+                            format!(
+                                "{}: the fragment {json:?} after the break is not the model's bytes as written",
+                                place()
+                            )
+                        });
+                    } else {
+                        breach("json-prefix", valid_json_prefix(so_far), || {
+                            format!(
+                                "{}: the arguments so far, {so_far:?}, are no valid JSON prefix",
+                                place()
+                            )
+                        });
+                    }
                 }
             }
             Event::ToolCallEnd { index, .. } => {
@@ -691,22 +774,47 @@ fn check_well_formed(case: &Case, which: &str, replayed: &Replayed) {
                         .find(|(i, _)| i == index)
                         .map(|(_, so_far)| so_far.as_str())
                         .unwrap_or_default();
-                    breach(
-                        "whole-json",
-                        serde_json::from_str::<Value>(so_far).is_ok(),
-                        || {
+                    // Three names for one promise, so that a run allows a class already
+                    // reported and still catches the others: a call that ended with no fragment
+                    // at all; a value whose shape closed but whose tokens JSON refuses (what the
+                    // prefix judge tolerates: a value left out, a trailing comma, an escape JSON
+                    // lacks, a short `\u`, whitespace outside JSON's, a number or a word cut
+                    // short); and the rest, the committed prefix of a value that never closed.
+                    if so_far.is_empty() {
+                        breach("empty-arguments", false, || {
                             format!(
-                                "{}: the call closed with arguments that are no whole JSON: {so_far:?}",
+                                "{}: the call ended with no arguments fragment at all",
                                 place()
                             )
-                        },
-                    );
+                        });
+                    } else if closed_structure(so_far) {
+                        breach("tolerated-json", whole_json(so_far), || {
+                            format!(
+                                "{}: the call ended with arguments whose shape closed but which JSON refuses: {so_far:?}",
+                                place()
+                            )
+                        });
+                    } else {
+                        breach("whole-json", whole_json(so_far), || {
+                            format!(
+                                "{}: the call ended with arguments that are the prefix of a value that never closed: {so_far:?}",
+                                place()
+                            )
+                        });
+                    }
                 }
             }
-            Event::Malformed { .. } => {
+            Event::Malformed { text, why } => {
                 for index in &started {
                     if !ended.contains(index) && !malformed_inside.contains(index) {
                         malformed_inside.push(*index);
+                    }
+                    if !ended.contains(index)
+                        && *why == MalformedReason::InvalidArguments
+                        && text.text.is_empty()
+                        && !broke.contains(index)
+                    {
+                        broke.push(*index);
                     }
                 }
             }
@@ -1353,6 +1461,14 @@ mod tests {
         assert!(made_up_empty_string("{\"city\": \"\"", "city="));
         assert!(!made_up_empty_string("{\"city\": \"\"", "city=\"\""));
         assert!(!made_up_empty_string("{\"city\": \"x\"", ""));
+        // A whole member through its closing byte: the object's or the list's close, or the
+        // next member's separator.
+        assert!(made_up_empty_string("{\"city\": \"\"}", "city="));
+        assert!(made_up_empty_string(", \"city\": \"\",", "city="));
+        assert!(made_up_empty_string("\"tags\": [\"\"]", "tags="));
+        assert!(made_up_empty_string("[\"\"]", " "));
+        assert!(!made_up_empty_string("{\"city\": \"\"}", "city=\"\""));
+        assert!(!made_up_empty_string("\"tags\": [\"\"]", "tags=[\"\"]"));
     }
 
     #[test]
@@ -1363,6 +1479,114 @@ mod tests {
         let case = decode(&data, Some(Table::Qwen3));
         assert!(!case.cuts.is_empty());
         check(&case);
+        Ok(())
+    }
+
+    #[test]
+    fn the_whole_json_judge_is_the_syntax_not_a_readers_number_range() -> Result<(), String> {
+        for whole in [
+            "9.99e999999",
+            "8888E8888",
+            "{\"days\": -1e999}",
+            "{}",
+            "[1, 2]",
+            "\"x\"",
+            "null",
+            // The grammar's escape, whatever the code point: a lone surrogate is syntax.
+            "{\"a\": \"\\ud800\"}",
+        ] {
+            assert!(whole_json(whole), "{whole}");
+        }
+        for refused in [
+            "84.",
+            "0e",
+            "1e+",
+            "-",
+            "nu",
+            "{\"a\": ,}",
+            "{\"a\": 1,}",
+            "[,,]",
+            "\"\\h\"",
+            "\"\\u0l\"",
+            "{\"a\": \"b",
+            "",
+            "{\"a\":\u{b}1}",
+            // A raw control character inside a string, which the escapes exist for.
+            "\"a\nb\"",
+            "{\"a\": \"b\tc\"}",
+        ] {
+            assert!(!whole_json(refused), "{refused:?}");
+        }
+        // The case the range judge flagged: the arguments pass through as the model wrote them,
+        // whole JSON text a client reads.
+        let output = "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"days\": 9.99e999999}}\n</tool_call>";
+        let data = encode(Table::Qwen3, "", output)?;
+        check(&decode(&data, Some(Table::Qwen3)));
+        Ok(())
+    }
+
+    #[test]
+    fn the_whole_json_promise_names_its_three_breaches() {
+        // The same stream, three arguments: no fragment at all; a shape that closed with a
+        // value left out, or one scalar token cut short; and a prefix that never closed.
+        let ended_with = |json: &str| {
+            let mut events = vec![start(0)];
+            if !json.is_empty() {
+                events.push(arguments(0, json, json));
+            }
+            events.extend([end(0, "</tool_call>"), finish(1)]);
+            breach_in(Table::Qwen3, events)
+        };
+        assert_eq!(ended_with("").as_deref(), Some("empty-arguments"));
+        for tolerated in [
+            "{\"city\": \"Paris\", \"days\": ,}",
+            "{\"a\": 1,}",
+            "0e",
+            "n",
+            "\"\\h\"",
+        ] {
+            assert_eq!(
+                ended_with(tolerated).as_deref(),
+                Some("tolerated-json"),
+                "{tolerated:?}"
+            );
+        }
+        for prefix in [
+            "{\"city\": \"Par",
+            "{\"city\": \"Paris\"",
+            "[1, [2",
+            "\"Par",
+        ] {
+            assert_eq!(
+                ended_with(prefix).as_deref(),
+                Some("whole-json"),
+                "{prefix:?}"
+            );
+        }
+        for whole in ["{\"city\": \"Paris\"}", "{}", "[]", "1", "\"x\""] {
+            assert_eq!(ended_with(whole), None, "{whole:?}");
+        }
+        assert!(closed_structure("{\"a\": \"}\"}") && !closed_structure("{\"a\": \"}\""));
+        assert!(!closed_structure("}") && !closed_structure("{]") && !closed_structure("  "));
+    }
+
+    #[test]
+    fn the_events_of_both_replays_are_the_streams_a_reader_sees() -> Result<(), String> {
+        let output = "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n</tool_call>";
+        let case = decode(&encode(Table::Qwen3, "", output)?, Some(Table::Qwen3));
+        let (whole, pieces) = (events(&case, &[]), events(&case, &case.cuts));
+        assert!(
+            pieces.len() > whole.len(),
+            "the pieces come as the deltas arrive"
+        );
+        for replay in [&whole, &pieces] {
+            let conserved: String = replay.iter().map(bytes_of).collect();
+            assert_eq!(conserved, output);
+            assert!(matches!(
+                replay.last(),
+                Some(Event::Finish { tool_calls: 1, .. })
+            ));
+        }
         Ok(())
     }
 

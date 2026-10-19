@@ -54,9 +54,12 @@ What the engine decides for every format, and what it leaves open:
   the assembler writes closes only at the call's own end, and so does one whose close cut a streamed
   string, in every tag-based syntax (`tagged::end_cut_call`): no closing quote and no closing brace
   are made up for a value the model never finished, and the one event carries the bytes still held,
-  when there are any. Gemma's reader does the same in its own way (`gemma::Assembler::end`): its one
+  when there are any (the keyed syntax refuses them first, as `Dropped { MalformedCall }`, and its
+  event carries none: `tagged::refuse`). Gemma's reader does the same in its own way (`gemma::Assembler::end`): its one
   event names the value's reason, which the engine does not rename, and the bytes held at the marker
-  are the string's text, not the event's.
+  are the string's text, not the event's. A pythonic call the end cut ends as a tagged one does
+  (`tagged::end_cut_call`), the cut right after its `(` included, since its object closes only at
+  the call's own `)`.
 - With the tagged syntax, a value's type comes from the request's tools (`Declared`): a
   declared string streams, every other value is written at its close. A call to a function the
   request did not declare has every value inferred.
@@ -104,6 +107,16 @@ is a later step).
   Face's null sink, the space around a response template's fields. Every byte of text there, a
   terminal with no row from the state and what the scanner held at the end included, is
   `Dropped { Wrapper }` at every finish; the state's rows still move the engine.
+- A terminal with no row from the state is the state's text, as the model wrote it (dropped where
+  the template discards the state's text). Where that text is the table's own content, a
+  `Malformed { MarkerOutOfPlace }` event of no bytes stands before it, so a reader counts a frame
+  the table did not read (an answer's opener written again inside the answer, a close with nothing
+  open) without a byte moving; in a thought the marker is the thought's text alone, as a table may
+  read a thought's opener as its text (a turn anchor's table), and so it stays in a state a
+  request's variant made content (`Format::is_remade`: the thought of a request that does not
+  separate reasoning, the calls of one without tools), where the table counted none: a thought
+  reads the same whether the request separates reasoning or not, and a call's header is the
+  call syntax's to judge; text in a wrapper state is malformed as text between calls, as before.
 - A table can trim a state's text stay by stay (`Format::trims`), as Hugging Face's `text` parser
   strips a field's value: whitespace before a stay's first other character is
   `Dropped { Whitespace }` as it arrives, and a run of it after the last one is held, with any

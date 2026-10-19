@@ -36,7 +36,7 @@ use smg::{
         ManualAssignmentMode, MemoryConfig, MetricsConfig, OracleConfig, ParserChoice,
         PdPairingMode, PolicyConfig, PostgresConfig, PowerOfTwoLoadMetric, RedisConfig,
         RetryConfig, RouterConfig, RoutingKeyOverrideConfig, RoutingMode, SchemaConfig,
-        TenantApiKeyEntry, TokenizerCacheConfig, TraceConfig,
+        TenantApiKeyEntry, TokenizerCacheConfig, TraceConfig, TurboJpegPolicy,
         DEFAULT_FILE_DISCOVERY_CHECK_INTERVAL_SECS,
     },
     mesh_discovery::MeshDiscoveryConfig,
@@ -276,6 +276,12 @@ fn parse_access_log_field(value: &str) -> Result<AccessLogField, String> {
 fn parse_mm_processing(value: &str) -> Result<MmProcessingMode, String> {
     MmProcessingMode::parse(value)
         .ok_or_else(|| format!("invalid value '{value}'; expected auto, router, or worker"))
+}
+
+/// Parse the `--mm-turbojpeg` value into a `TurboJpegPolicy`.
+fn parse_mm_turbojpeg(value: &str) -> Result<TurboJpegPolicy, String> {
+    TurboJpegPolicy::parse(value)
+        .ok_or_else(|| format!("invalid value '{value}'; expected prefer or require"))
 }
 
 fn parse_positive_usize(value: &str) -> Result<usize, String> {
@@ -830,14 +836,14 @@ struct WorkerArgs {
     /// is four deep, after which new requests stop being routed to it until
     /// it makes progress. The bound stretches to the time its in-flight
     /// prompts may still need in prefill, up to 120 seconds. The pile is the
-    /// streaming gRPC generations in flight; HTTP workers, PD legs and
+    /// streaming gRPC generations in flight; HTTP workers, PD sides and
     /// non-streaming generations give no signal and never form one. The
-    /// same bound, read per request, is how long a prefill leg of a
+    /// same bound, read per request, is how long a prefill side of a
     /// disaggregated dispatch may produce nothing, with its worker answering
-    /// no other leg either, before its request fails over to another
-    /// prefill worker (or fails, when there is none); a leg queued on a
+    /// no other side either, before its request fails over to another
+    /// prefill worker (or fails, when there is none); a side queued on a
     /// worker that keeps answering waits on. On the parallel dispatch shape
-    /// a prefill leg's first response also waits for the decode side (its
+    /// a prefill side's first response also waits for the decode side (its
     /// bootstrap, and KV pre-allocation under decode pressure), so the
     /// threshold must cover that wait for a prefill worker with nothing
     /// else to answer meanwhile. 0 disables both.
@@ -944,6 +950,16 @@ struct WorkerArgs {
     /// connected. Falls back to `SMG_MM_ALLOW_PRIVATE_MEDIA_HOSTS`.
     #[arg(long, action = ArgAction::SetTrue, help_heading = "Multimodal")]
     mm_allow_private_media_hosts: bool,
+
+    /// What the gateway's own media pipeline does when libjpeg-turbo
+    /// (`libturbojpeg.so.0`) cannot be loaded: `prefer` (default) decodes
+    /// JPEGs with the pure-Rust decoder, whose pixels differ from the
+    /// reference decoder's by a few levels, says so once at start-up and
+    /// sets the gauge `smg_mm_turbojpeg_available` to 0; `require` stops
+    /// start-up with an error instead, for a deployment whose pixels must
+    /// match the engine's. Falls back to `SMG_MM_TURBOJPEG`.
+    #[arg(long, value_parser = parse_mm_turbojpeg, help_heading = "Multimodal")]
+    mm_turbojpeg: Option<TurboJpegPolicy>,
 
     /// Listener IP for the RDMA pixel lane's metadata exchange, a plain IPv4
     /// or IPv6 address (no hostname, port or brackets: the workers connect to
@@ -2475,11 +2491,9 @@ impl CliArgs {
                 selection_accounting_ttl_ms: self.routing.selection_accounting_ttl_ms,
             },
             "power_of_two" => PolicyConfig::PowerOfTwo {
-                load_check_interval_secs: 5,
                 load_metric: self.routing.power_of_two_load_metric,
             },
             "least_load" => PolicyConfig::LeastLoad {
-                load_check_interval_secs: 5,
                 kv_pressure_weight: self.routing.least_load_kv_pressure_weight,
                 mean_prefill_tokens: self.routing.least_load_mean_prefill_tokens,
                 default_throughput: self.routing.least_load_default_throughput,
@@ -3164,6 +3178,7 @@ impl CliArgs {
             .mm_pixel_rdma(self.workers.mm_pixel_rdma)
             .mm_allowed_media_domains(self.workers.mm_allowed_media_domains.clone())
             .mm_allow_private_media_hosts(self.workers.mm_allow_private_media_hosts)
+            .mm_turbojpeg(self.workers.mm_turbojpeg)
             .rdma_listen_ip(self.workers.rdma_listen_ip.clone())
             .rdma_slot_ttl_s(self.workers.rdma_slot_ttl_s)
             .log_mm_timing(self.workers.log_mm_timing)
@@ -5240,6 +5255,8 @@ mod tests {
             "--mm-allowed-media-domains",
             "media.example,cdn.example",
             "--mm-allow-private-media-hosts",
+            "--mm-turbojpeg",
+            "require",
         ]);
         let domains = Some(vec!["media.example".to_string(), "cdn.example".to_string()]);
 
@@ -5252,6 +5269,7 @@ mod tests {
         assert!(router_config.log_mm_timing);
         assert_eq!(router_config.mm_allowed_media_domains, domains);
         assert!(router_config.mm_allow_private_media_hosts);
+        assert_eq!(router_config.mm_turbojpeg, Some(TurboJpegPolicy::Require));
 
         let server_config = cli.to_server_config(router_config).unwrap();
         let nested = &server_config.router_config;
@@ -5263,6 +5281,7 @@ mod tests {
         assert!(nested.log_mm_timing);
         assert_eq!(nested.mm_allowed_media_domains, domains);
         assert!(nested.mm_allow_private_media_hosts);
+        assert_eq!(nested.mm_turbojpeg, Some(TurboJpegPolicy::Require));
     }
 
     #[test]
@@ -5277,9 +5296,11 @@ mod tests {
         assert!(!router_config.log_mm_timing);
         assert_eq!(router_config.mm_allowed_media_domains, None);
         assert!(!router_config.mm_allow_private_media_hosts);
+        assert_eq!(router_config.mm_turbojpeg, None);
 
         let server_config = cli.to_server_config(router_config).unwrap();
         assert_eq!(server_config.router_config.mm_processing, None);
+        assert_eq!(server_config.router_config.mm_turbojpeg, None);
         assert!(!server_config.router_config.log_mm_timing);
         assert!(!server_config.router_config.mm_allow_private_media_hosts);
     }
@@ -5325,6 +5346,9 @@ mod tests {
         assert!(Cli::try_parse_from(["smg", "--mm-pixel-cache-mb", "-1"]).is_err());
         let cli = cli_args_from(&["--mm-processing", "Router"]);
         assert_eq!(cli.workers.mm_processing, Some(MmProcessingMode::Router));
+        assert!(Cli::try_parse_from(["smg", "--mm-turbojpeg", "required"]).is_err());
+        let cli = cli_args_from(&["--mm-turbojpeg", "Require"]);
+        assert_eq!(cli.workers.mm_turbojpeg, Some(TurboJpegPolicy::Require));
     }
 
     /// The multimodal transport flags must reach both `RouterConfig` and the

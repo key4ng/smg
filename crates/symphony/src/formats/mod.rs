@@ -10,6 +10,8 @@
 //!
 //! [`Format`]: crate::Format
 //! [`Engine`]: crate::Engine
+pub mod deepseek_v3;
+pub mod deepseek_v3_1;
 pub mod deepseek_v3_2;
 pub mod deepseek_v4;
 pub mod deepseek_v4_1;
@@ -28,6 +30,7 @@ pub mod kimi_k2;
 pub mod kimi_k3;
 pub mod lfm2_5;
 pub mod ling;
+pub mod llama4;
 pub mod llama_nemotron;
 pub mod minicpm5;
 pub mod minimax_m2;
@@ -42,6 +45,8 @@ pub mod registry;
 pub mod seed_oss;
 pub mod xlam;
 
+pub use deepseek_v3::deepseek_v3;
+pub use deepseek_v3_1::deepseek_v3_1;
 pub use deepseek_v3_2::deepseek_v3_2;
 pub use deepseek_v4::deepseek_v4;
 pub use deepseek_v4_1::deepseek_v4_1;
@@ -60,6 +65,7 @@ pub use kimi_k2::kimi_k2;
 pub use kimi_k3::kimi_k3;
 pub use lfm2_5::lfm2_5;
 pub use ling::ling;
+pub use llama4::llama4;
 pub use llama_nemotron::llama_nemotron;
 pub use minicpm5::minicpm5;
 pub use minimax_m2::minimax_m2;

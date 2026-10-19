@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use llm_multimodal::jpeg_turbo::TurboJpegPolicy;
 use openai_protocol::worker::{MmProcessingMode, TransportMode};
 use smg_mcp::McpConfig;
 
@@ -151,9 +152,8 @@ impl RouterConfigBuilder {
         self
     }
 
-    pub fn power_of_two_policy(mut self, load_check_interval_secs: u64) -> Self {
+    pub fn power_of_two_policy(mut self) -> Self {
         self.config.policy = PolicyConfig::PowerOfTwo {
-            load_check_interval_secs,
             load_metric: Default::default(),
         };
         self
@@ -424,6 +424,13 @@ impl RouterConfigBuilder {
     /// Serve cached pixels over RDMA (legacy switch for the RDMA lane).
     pub fn mm_pixel_rdma(mut self, enabled: bool) -> Self {
         self.config.mm_pixel_rdma = enabled;
+        self
+    }
+
+    /// What the router's own media pipeline does when libjpeg-turbo cannot be
+    /// loaded: `prefer` (the fallback decoder) or `require` (no start-up).
+    pub fn mm_turbojpeg(mut self, policy: Option<TurboJpegPolicy>) -> Self {
+        self.config.mm_turbojpeg = policy;
         self
     }
 
@@ -1223,7 +1230,7 @@ mod tests {
                 vec![("http://prefill:8000".to_string(), Some(8001))],
                 vec!["http://decode:8000".to_string()],
             )
-            .power_of_two_policy(60)
+            .power_of_two_policy()
             .build()
             .unwrap();
 

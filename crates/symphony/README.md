@@ -40,8 +40,9 @@ one implementation.
 
 Every byte of output lands in exactly one event: content, reasoning, a call's name, a fragment of
 its arguments, bytes the format dropped as wrapping (`Dropped`, with the reason), or bytes a region
-could not be parsed from (`Malformed`, returned whole with the reason). Nothing vanishes silently,
-and a client that wants the raw text back can have it.
+could not be parsed from (`Malformed`, returned whole with the reason, or as `Dropped` bytes behind
+an event of no bytes where the syntax's block is never prose). Nothing vanishes silently, and a
+client that wants the raw text back can have it.
 
 ### The public types
 
@@ -61,8 +62,8 @@ the scanner and the token ledger are the engine's own.
 | `Engine` | The one parser that runs any table: `Engine::new(format, declared)`. |
 | `ValueRead`, `Inferred`, `Format::reads_values_with` | How a shaped call's values read: a tagged value's text by the template's parser (`shape::ValueParser`), typed by its parameter's schema; a member of JSON arguments held and typed where the reader says; a key written twice. A table names its reader; `Inferred`, the default, reads as the tagged tables do, and a crate that implements a template library's semantics gives its own. |
 | `shape::Layout`, `Format::with_layout` | How the model's chat template writes a turn where a response template's patterns leave the text open: the whitespace a `\s*` stands for, the text outside every field, each part of a call, the values, a thought and an answer, and which close the template writes for a region it closes more than one way. Whoever compiles the table learns it from a rendering, reading the call's shape through `Format::call_syntax` and the markers through `Format::terminal_texts`, and gives it to the table; `Layout::check` says whether it fits. Parsing does not read it; the structural tags of a shaped call are written from it. |
-| `Declared` | The parameter types the request's tools declare, which type a tagged call's values. |
-| `formats::*` | One function per family, each returning its table: `qwen3(syntax)`, `qwen2_5()`, `deepseek_v3_2()`, `deepseek_v4()`, `deepseek_v4_1()`, `seed_oss()`, `hy4()`, `ling()`, `iquest()`, `glm()`, `glm4()`, `k2_horizon()`, `olmo3()`, `lfm2_5()`, `xlam()`, `json()`, `minimax_m2()`, `minimax_m3()`, `kimi_k3()`, `kimi_k2()`, `inkling()`, `minicpm5()`, `dots3()`, `gemma4()`, `function_gemma()`, `mistral_v13()`, `llama_nemotron()`, `forced()`, `plain()`. |
+| `Declared` | What the request's tools declare: the parameter types, which type a tagged call's values and the quoted pythonic dialect's (`Declared::kind`), and whether a tool declares a function (`Declared::declares`), which decides whether a list after content is held and read as calls. |
+| `formats::*` | One function per family, each returning its table: `qwen3(syntax)`, `qwen2_5()`, `deepseek_v3()`, `deepseek_v3_1()`, `deepseek_v3_2()`, `deepseek_v4()`, `deepseek_v4_1()`, `seed_oss()`, `hy4()`, `ling()`, `iquest()`, `glm()`, `glm4()`, `k2_horizon()`, `olmo3()`, `lfm2_5()`, `llama4()`, `xlam()`, `json()`, `minimax_m2()`, `minimax_m3()`, `kimi_k3()`, `kimi_k2()`, `inkling()`, `minicpm5()`, `dots3()`, `gemma4()`, `function_gemma()`, `mistral_v13()`, `llama_nemotron()`, `forced()`, `plain()`. |
 | `adapt::chat`, `adapt::responses`, `adapt::messages` | Pure functions from events to Chat Completions, Responses and Messages API shapes, streamed (`delta`, `Stream`) and whole (`message`, `output`); the driver adds only the envelope. |
 | `Grammar`, `Tag`, `Format::grammar`, `Format::grammar_for`, `grammar::Options` | The structural tag an engine takes for a forced or required call, derived from the same table and the request's tools, or `None` for a table without calls: `to_json()` as the engine reads it, `payload()` as a request carries it. `grammar_for` takes the request's `Options`, one call among them (a named function, `parallel_tool_calls: false`); `Format::answer_grammar` is the tag for an answer that is JSON a schema accepts (`response_format`). A table given its vocabulary's added tokens (`Format::marker_tokens`) writes each marker that is one token as that token (`Grammar::Token`) inside its tags; `CallSyntax::tag_texts` lists each syntax's own tags. A call given as data gets its tag from the table's layout (`Format::with_layout`): what the model's chat template writes, and no tag without one. |
 | `Format::turn_grammar`, `Turn`, `Format::output_spelling`, `OutputSpelling`, `Output`, `Format::output_position` | The output grammar for a whole assistant turn, for a table whose calls are addressed to a tool (a call given as data whose header names the tool and whose parameters are tags around raw text): the thought, then an answer (free, JSON, a regex or an EBNF grammar) or calls to the tools the request lets the model call, each held to its schema, from the first token. `output_spelling` reads the turn's texts from the table's rows and the call's shape; `OutputSpelling::grammar` builds the grammar for one request (`Output`: where `output_position` says the prompt leaves the model, the tools, the choice, the answer's format). `turn_grammar` is the one call a gateway makes: it builds that grammar for a request (`Turn`) or refuses what it cannot hold. A tag may end at any of several texts (`Bound`), and JSON may keep words out of its strings. |
@@ -219,30 +220,19 @@ and later and Qwen3-Coder). `formats::for_model` picks the table from the model 
 repository name in any case, the group's primary or any checkpoint under **Also**, so a model
 listed here with a table needs neither flag once the gateway reads it with Symphony (a quantized
 or renamed checkpoint is not listed: the flags, or its workers' labels, name its table until its
-group names it, else it keeps the older parsers). The flags stay, as aliases: under `--parser symphony` a legacy tool-call or
-reasoning parser's name whose format a table reads is a name of that table (`Table::ALIASES`:
-`qwen` for `qwen3`; `qwen_xml`, `qwen_coder` and `nemotron` for
-`qwen3_tagged`; `glm45_moe` for `glm4`; `glm47_moe` for `glm`; `hy_v4` for `hy4`; `kimik2`,
-`kimi_thinking` and `kimi_k25` for `kimi_k2`; `deepseek32` for `deepseek_v3.2`; `deepseek_v41`
-for `deepseek_v4.1`; `minimax` for `minimax_m2`; `muse`, a launcher's name for a family whose table
-has no older parser, for `muse_spark`; a table's own name where the legacy parser
-carries it, `json`, `gemma4`, `qwen3`, `deepseek_v4`, `kimi_k3`, `inkling`, `minimax_m2`,
-`minimax_m3`), so a deployment's existing flags keep a working parser when the gateway's default
-parser changes. A legacy name no table answers to keeps the legacy parsers as a tool-call name and
-selects nothing as a reasoning name alone (after a worker's labels the registry's table for a model
-it knows, else the flags, else the legacy parsers); `Table::UNANSWERED` lists each with
-the reason: `passthrough` (the way back for one model), `base` (a thought of no family's), `glm45`,
-`nano_v3` and `qwen3_thinking` (a thought two tables' families share: the tool-call name
-decides), `kimi` (thought
-markers no table reads), `step3`, `sarashina`, `cohere` and `cohere_cmd` (no table), and the names
-of the families whose table is not on main yet (`deepseek`, `deepseek31`,
-`deepseek_r1`, `deepseek_v31`, `llama`, `pythonic`, `mistral`), which the table takes when it lands. The gateway's test over its two parser
-registries holds every legacy name to one of the two lists. The Harmony family (gpt-oss) has no
+group names it, else it keeps the older parsers). The flags stay: under `--parser symphony` the gateway maps a legacy tool-call or reasoning parser's
+name whose format a table reads to that table (`qwen` for `qwen3`, `qwen_xml` for `qwen3_tagged`, a
+launcher's `muse` for `muse_spark`; the map is the gateway's `routers::grpc::utils::ALIASES`, beside
+its parser resolution), so a deployment's existing flags keep a working parser when the gateway's
+default parser changes; a legacy name no table answers to keeps the legacy parsers as a tool-call
+name and selects nothing as a reasoning name alone, and the gateway lists each such name with the
+reason (`utils::UNANSWERED`); its test over both legacy registries holds every legacy name to one of
+three: a table's own name (`qwen3`, `gemma4`), a row of `ALIASES`, or a row of `UNANSWERED`. The crate knows a table by its own name only (`Table::named`). The Harmony family (gpt-oss) has no
 table and no alias: it stays on the Harmony pipeline, by the maintainers' decision of 2026-10-17.
 
 <!-- models: begin -->
-212 groups, 357 checkpoints, newest first.
-12 ready, 134 replaying a recorded set, 10 on main awaiting fixtures, 56 pending.
+215 groups, 362 checkpoints, newest first.
+12 ready, 140 replaying a recorded set, 10 on main awaiting fixtures, 53 pending.
 
 | Released | Group | Model | Also | Table | bellwether set | Status | SMG today |
 |---|---|---|---|---|---:|---|---|
@@ -256,7 +246,7 @@ table and no alias: it stays on the Harmony pipeline, by the maintainers' decisi
 | 2026-09-21 | [mimo-v2.6-flash-rl](https://github.com/smg-project/bellwether/tree/main/fixtures/mimo-v2.6-flash-rl) | XiaomiMiMo/MiMo-V2.6-Flash-RL |  | `qwen3`, tagged calls, the value between the tags | 589,298 | replaying the set | none |
 | 2026-09-21 | [mimo-v2.6-pro-rl](https://github.com/smg-project/bellwether/tree/main/fixtures/mimo-v2.6-pro-rl) | XiaomiMiMo/MiMo-V2.6-Pro-RL | MiMo-V2.6-Flash-MOPD, MiMo-V2.6-Pro-MOPD | `qwen3`, tagged calls, the value between the tags | 589,298 | replaying the set | none |
 | 2026-09-11 | [atria-dawn-preview](https://github.com/smg-project/bellwether/tree/main/fixtures/atria-dawn-preview) | internlm/Atria-Dawn-Preview | Atria-Dawn-Preview-Ascend-w8a8 | `glm` | 503,273 | replaying the set | none |
-| 2026-09-10 | [deepseek-v4.1-flash](https://github.com/smg-project/bellwether/tree/main/fixtures/deepseek-v4.1-flash) | deepseek-ai/DeepSeek-V4.1-Flash |  | `deepseek_v4.1` | 589,659 | replaying the set | `deepseek_v41`, `deepseek_v41` |
+| 2026-09-10 | [deepseek-v4.1-flash](https://github.com/smg-project/bellwether/tree/main/fixtures/deepseek-v4.1-flash) | deepseek-ai/DeepSeek-V4.1-Flash | DeepSeek-V4.1-Flash-1017 | `deepseek_v4.1` | 589,659 | replaying the set | `deepseek_v41`, `deepseek_v41` |
 | 2026-09-06 | [minicpm5-2b](https://github.com/smg-project/bellwether/tree/main/fixtures/minicpm5-2b) | openbmb/MiniCPM5-2B |  | `minicpm5` | 589,277 | replaying the set | none |
 | 2026-09-01 | [k2-horizon-36b](https://github.com/smg-project/bellwether/tree/main/fixtures/k2-horizon-36b) | IFM/K2-Horizon-36B | K2-Horizon-32B, K2-Horizon-375B-A23B | `k2_horizon` | 12,814 | replaying the set | none |
 | 2026-09-01 | [nvidia-nemotronlabs-ai-for-media-sports-tennis](https://github.com/smg-project/bellwether/tree/main/fixtures/nvidia-nemotronlabs-ai-for-media-sports-tennis) | nvidia/NVIDIA-NemotronLabs-AI-for-Media-Sports-Tennis |  | — | 12,825 | pending | none |
@@ -371,7 +361,7 @@ table and no alias: it stays on the Harmony pipeline, by the maintainers' decisi
 | 2025-10-01 | [llama-3.1-nemotron-nano-vl-8b-v1-fp4-qad](https://github.com/smg-project/bellwether/tree/main/fixtures/llama-3.1-nemotron-nano-vl-8b-v1-fp4-qad) | nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1-FP4-QAD |  | — | 328,662 | pending | `json`, `nano_v3` |
 | 2025-09-30 | [qwen3-4b-saferl](https://github.com/smg-project/bellwether/tree/main/fixtures/qwen3-4b-saferl) | Qwen/Qwen3-4B-SafeRL |  | `qwen3` | 54,418 | ready | `qwen`, `qwen3` |
 | 2025-09-30 | [qwen3-vl-30b-a3b-instruct](https://github.com/smg-project/bellwether/tree/main/fixtures/qwen3-vl-30b-a3b-instruct) | Qwen/Qwen3-VL-30B-A3B-Instruct | Qwen3-VL-235B-A22B-Instruct | `qwen3` | 576,772 | replaying the set | `qwen`, `qwen3` |
-| 2025-09-29 | [deepseek-v3.2-exp](https://github.com/smg-project/bellwether/tree/main/fixtures/deepseek-v3.2-exp) | deepseek-ai/DeepSeek-V3.2-Exp | DeepSeek-V3.2-Exp-Base | — | 184,972 | pending | `deepseek31`, none |
+| 2025-09-29 | [deepseek-v3.2-exp](https://github.com/smg-project/bellwether/tree/main/fixtures/deepseek-v3.2-exp) | deepseek-ai/DeepSeek-V3.2-Exp | DeepSeek-V3.2-Exp-Base | `deepseek_v3.1` | 184,972 | replaying the set | `deepseek31`, none |
 | 2025-09-29 | [glm-4.6](https://github.com/smg-project/bellwether/tree/main/fixtures/glm-4.6) | zai-org/GLM-4.6 | GLM-4.5, GLM-4.5-Air | `glm4` | 492,389 | replaying the set | `glm45_moe`, none |
 | 2025-09-25 | [caprl-eval-3b](https://github.com/smg-project/bellwether/tree/main/fixtures/caprl-eval-3b) | internlm/CapRL-Eval-3B |  | `qwen2.5` | 576,772 | replaying the set | none |
 | 2025-09-24 | [caprl-3b](https://github.com/smg-project/bellwether/tree/main/fixtures/caprl-3b) | internlm/CapRL-3B |  | `qwen2.5` | 576,772 | replaying the set | none |
@@ -386,7 +376,7 @@ table and no alias: it stays on the Harmony pipeline, by the maintainers' decisi
 | 2025-09-03 | [kimi-k2-instruct-0905](https://github.com/smg-project/bellwether/tree/main/fixtures/kimi-k2-instruct-0905) | moonshotai/Kimi-K2-Instruct-0905 |  | `kimi_k2` | — | awaiting fixtures | `kimik2`, `kimi` |
 | 2025-09-01 | [apertus-70b-instruct-2509](https://github.com/smg-project/bellwether/tree/main/fixtures/apertus-70b-instruct-2509) | swiss-ai/Apertus-70B-Instruct-2509 |  | — | 137,178 | pending | none |
 | 2025-08-30 | [hermes-4-14b](https://github.com/smg-project/bellwether/tree/main/fixtures/hermes-4-14b) | NousResearch/Hermes-4-14B |  | `qwen2.5` | 576,772 | replaying the set | none |
-| 2025-08-21 | [deepseek-v3.1](https://github.com/smg-project/bellwether/tree/main/fixtures/deepseek-v3.1) | deepseek-ai/DeepSeek-V3.1 | DeepSeek-V3.1-Base, tencent/DeepSeek-V3.1-Terminus-W4AFP8 | — | 19,299 | pending | `deepseek31`, `deepseek_v31` |
+| 2025-08-21 | [deepseek-v3.1](https://github.com/smg-project/bellwether/tree/main/fixtures/deepseek-v3.1) | deepseek-ai/DeepSeek-V3.1 | DeepSeek-V3.1-Base, tencent/DeepSeek-V3.1-Terminus-W4AFP8 | `deepseek_v3.1` | 19,299 | replaying the set | `deepseek31`, `deepseek_v31` |
 | 2025-08-20 | [llama-3.1-nemotron-safety-guard-8b-v3](https://github.com/smg-project/bellwether/tree/main/fixtures/llama-3.1-nemotron-safety-guard-8b-v3) | nvidia/Llama-3.1-Nemotron-Safety-Guard-8B-v3 |  | `json` | 458,185 | replaying the set | `json`, none |
 | 2025-08-20 | [seed-oss-36b-instruct](https://github.com/smg-project/bellwether/tree/main/fixtures/seed-oss-36b-instruct) | ByteDance-Seed/Seed-OSS-36B-Instruct | Seed-OSS-36B-Base-woSyn | `seed_oss` | 495,977 | replaying the set | none |
 | 2025-08-13 | [apertus-8b-instruct-2509](https://github.com/smg-project/bellwether/tree/main/fixtures/apertus-8b-instruct-2509) | swiss-ai/Apertus-8B-Instruct-2509 |  | — | 137,178 | pending | none |
@@ -430,10 +420,13 @@ table and no alias: it stays on the Harmony pipeline, by the maintainers' decisi
 | 2025-04-08 | [llama-3-1-nemotron-ultra-253b-cpt-v1](https://github.com/smg-project/bellwether/tree/main/fixtures/llama-3-1-nemotron-ultra-253b-cpt-v1) | nvidia/Llama-3_1-Nemotron-Ultra-253B-CPT-v1 |  | `json` | 458,185 | replaying the set | `json`, none |
 | 2025-04-07 | [baichuanmed-ocr-7b](https://github.com/smg-project/bellwether/tree/main/fixtures/baichuanmed-ocr-7b) | baichuan-inc/BaichuanMed-OCR-7B | BaichuanMed-OCR-72B | `qwen2.5` | 576,772 | replaying the set | none |
 | 2025-04-07 | [llama-3-1-nemotron-ultra-253b-v1](https://github.com/smg-project/bellwether/tree/main/fixtures/llama-3-1-nemotron-ultra-253b-v1) | nvidia/Llama-3_1-Nemotron-Ultra-253B-v1 |  | `llama_nemotron` | 328,643 | replaying the set | `json`, none |
+| 2025-04-02 | [llama-4-scout-17b-16e](https://github.com/smg-project/bellwether/tree/main/fixtures/llama-4-scout-17b-16e) | meta-llama/Llama-4-Scout-17B-16E |  | — | 576,758 | pending | `pythonic`, none |
+| 2025-04-02 | [llama-4-scout-17b-16e-instruct](https://github.com/smg-project/bellwether/tree/main/fixtures/llama-4-scout-17b-16e-instruct) | meta-llama/Llama-4-Scout-17B-16E-Instruct |  | `llama4` | 576,438 | replaying the set | `pythonic`, none |
+| 2025-04-01 | [llama-4-maverick-17b-128e-instruct](https://github.com/smg-project/bellwether/tree/main/fixtures/llama-4-maverick-17b-128e-instruct) | meta-llama/Llama-4-Maverick-17B-128E-Instruct | Llama-4-Maverick-17B-128E-Instruct-FP8 | `llama4` | 576,438 | replaying the set | `pythonic`, none |
 | 2025-03-27 | [llama-xlam-2-8b-fc-r](https://github.com/smg-project/bellwether/tree/main/fixtures/llama-xlam-2-8b-fc-r) | Salesforce/Llama-xLAM-2-8b-fc-r |  | `xlam` | 483,062 | replaying the set | `json`, none |
 | 2025-03-26 | [granite-speech-3.2-8b](https://github.com/smg-project/bellwether/tree/main/fixtures/granite-speech-3.2-8b) | ibm-granite/granite-speech-3.2-8b |  | — | 328,662 | pending | none |
-| 2025-03-24 | [deepseek-v3-0324](https://github.com/smg-project/bellwether/tree/main/fixtures/deepseek-v3-0324) | deepseek-ai/DeepSeek-V3-0324 | DeepSeek-Prover-V2-671B | — | 19,299 | pending | `deepseek`, none |
-| 2025-03-24 | [deepseek-v3-0324-bf16](https://github.com/smg-project/bellwether/tree/main/fixtures/deepseek-v3-0324-bf16) | arcee-ai/DeepSeek-V3-0324-bf16 |  | — | 3,110 | pending | `deepseek`, none |
+| 2025-03-24 | [deepseek-v3-0324](https://github.com/smg-project/bellwether/tree/main/fixtures/deepseek-v3-0324) | deepseek-ai/DeepSeek-V3-0324 | DeepSeek-Prover-V2-671B | `deepseek_v3` | 19,299 | replaying the set | `deepseek`, none |
+| 2025-03-24 | [deepseek-v3-0324-bf16](https://github.com/smg-project/bellwether/tree/main/fixtures/deepseek-v3-0324-bf16) | arcee-ai/DeepSeek-V3-0324-bf16 |  | `deepseek_v3` | 3,110 | replaying the set | `deepseek`, none |
 | 2025-03-22 | [qwen2.5-omni-7b](https://github.com/smg-project/bellwether/tree/main/fixtures/qwen2.5-omni-7b) | Qwen/Qwen2.5-Omni-7B | Qwen2.5-Omni-3B | `qwen2.5` | 328,662 | replaying the set | `qwen`, `qwen3` |
 | 2025-03-21 | [qwen2.5-vl-32b-instruct](https://github.com/smg-project/bellwether/tree/main/fixtures/qwen2.5-vl-32b-instruct) | Qwen/Qwen2.5-VL-32B-Instruct |  | `qwen2.5` | 328,662 | replaying the set | `qwen`, `qwen3` |
 | 2025-03-16 | [llama-3-3-nemotron-super-49b-v1](https://github.com/smg-project/bellwether/tree/main/fixtures/llama-3-3-nemotron-super-49b-v1) | nvidia/Llama-3_3-Nemotron-Super-49B-v1 |  | `llama_nemotron` | — | awaiting fixtures | `json`, `nano_v3` |

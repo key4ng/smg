@@ -52,13 +52,26 @@ the instrumented build goes to `$CARGO_TARGET_DIR/symphony-fuzz`.
 A target stops at its first crash. `--keep-going` runs libFuzzer's fork mode instead, which keeps
 every crash's artifact and continues, so that one campaign collects every class; a class that
 recurs on every mutation of a seed still restarts the job each time and holds that target back.
+A fork child that stops working (asleep after its crash handler, no CPU time accruing while the
+parent waits for it) is stopped by `stall-watchdog.sh`, which `run.sh` runs beside its fork-mode
+runs: a child older than two minutes whose CPU ticks did not grow over two samples is killed
+(SIGKILL, which the parent counts as a crash it ignores; a TERM would reach libFuzzer's own
+handler, whose exit code makes the parent stop the whole target), the stop is logged under
+`logs/<label>/watchdog.log`, and the parent spawns the next job; parents are never touched, and
+the watchdog ends with the run.
 Once a class is reported, `--allow <names>` (the environment variable `SYMPHONY_FUZZ_ALLOW`, comma
-separated) makes the harness look past it, so that the next class surfaces: for the whole-JSON
-check it is `--allow whole-json`. Every check honors it. An allowance is for a run, never for the
-default; the names are the ones the breach messages carry. The nightly workflow allows
-`whole-json` until the parser fixes the first campaign found land, and `made-up-empty-string`
-until the pythonic reader reports a value left out instead of writing an empty string for it, and
-no more than that.
+separated) makes the harness look past it, so that the next class surfaces. Every check honors it.
+An allowance is for a run, never for the default; the names are the ones the breach messages carry.
+The whole-JSON promise breaks under three names, so that an allowance is exact: `empty-arguments`
+(a call ended with no arguments fragment at all), `tolerated-json` (arguments whose shape closed,
+or one scalar token, but which JSON refuses: a value left out, a trailing comma, an escape JSON
+lacks, a short `\u`, whitespace outside JSON's, a number or a word cut short) and `whole-json` (the
+committed prefix of a value that never closed). `json-prefix` holds until a call's
+`Malformed { InvalidArguments }` event of no bytes says where its arguments stopped being JSON;
+from there `verbatim-after-break` asks that every fragment be the model's bytes as written. A name
+is a shape, from any reader on every target, not a reader's own. The nightly workflow allows the shapes of the classes reported and
+not yet fixed, named in `symphony-fuzz.yml`; a name leaves the list with its fix, and a new
+reader's breach of an allowed shape surfaces then.
 
 One target by hand, with libFuzzer's own options after `--`:
 
@@ -114,7 +127,8 @@ check saw. In fork mode the message is in the job's own log; replaying the artif
 2. Minimize: `cargo +nightly fuzz tmin --sanitizer none <target> artifacts/<label>/<target>/crash-<hash>`
    writes the smallest input that still crashes next to it as `minimized-from-<hash>`.
 3. Explain: `cargo +nightly run --release --example explain -- <target> <file>` prints the decoded
-   case and runs the checks on it outside the fuzzer.
+   case and runs the checks on it outside the fuzzer; with `--events` it prints the events of the
+   whole replay and of the replay in pieces first, one per line, the streams a reader sees.
 4. File it: an issue with the target, the crate's commit, the decoded case from step 3 (the output
    as a Rust string literal and the cuts are enough to replay it; attach the minimized bytes when
    the literal is unwieldy), the invariant that failed and the check's message. Nothing else from

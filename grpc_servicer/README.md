@@ -75,7 +75,13 @@ through `GetServerInfo`; a router with media-reference support forwards
 labels and keeps sending preprocessed tensors. Whatever the processor mode, a
 multimodal engine also advertises its resolved `--limit-mm-per-prompt` as
 `mm_item_limits` (`image=8,video=2`), so a router that preprocesses media
-itself holds requests to the engine's limits. vLLM's `--allowed-media-domains`,
+itself holds requests to the engine's limits, and its encoder budget as
+`mm_encoder_budget` (the `budget of N tokens` of the engine's encoder-cache
+start-up line, derived at launch with vLLM's own helper): the most feature
+tokens one media item may carry and still be scheduled, so the router refuses
+a larger item (a long video sampled at a high rate) with a 400 that names the
+item's size and the budget, instead of sending the engine an item it admits
+and never schedules. vLLM's `--allowed-media-domains`,
 `--allowed-local-media-path`, `--media-io-kwargs`, `--limit-mm-per-prompt` and
 `VLLM_*_FETCH_TIMEOUT` govern fetching on the worker; without
 `--allowed-media-domains` the worker fetches from any public host the router
@@ -89,7 +95,7 @@ by default) overrides the model's per-modality reference limits;
 `--mm-max-item-bytes` (`SMG_VLLM_MM_MAX_ITEM_BYTES`, default 32 MiB) caps inline
 `data:` payloads; `SMG_VLLM_MM_MAX_VIDEO_FRAMES` (env only for now; default 0,
 meaning vLLM's own `--media-io-kwargs` decide) caps the frames a video is
-sampled to, so long clips stay bounded. All eight flag-backed settings are
+sampled to, so long clips stay bounded. All nine flag-backed settings are
 validated when the servicer starts, whatever the processor mode, so a stale
 unreadable value fails loudly. Two layers bound an inline item: the router
 refuses a `data:` item above its own per-kind input bound
@@ -124,6 +130,25 @@ the worker will schedule the full placeholder run. The `E2E_MM_PROCESSING=worker
 e2e lanes run the multimodal suites in this mode, and
 `crates/multimodal/scripts/check_worker_anchor_parity.py` checks that a spec's
 anchor is the token vLLM expands.
+
+Both pipelines (the router's own and `--mm-processor smg` on the worker)
+decode JPEGs through libjpeg-turbo's TurboJPEG library when `libturbojpeg.so.0`
+loads, so their pixels are the ones an engine that decodes with Pillow sees.
+Without the library they fall back to a pure-Rust decoder whose pixels differ
+by a few levels on up to a fifth of a JPEG's bytes (no JPEG of the parity
+corpus decodes identically), and the only marks of that state are the start-up
+line `libturbojpeg not found: JPEGs decode with the pure-Rust decoder ...` and
+the gauge `smg_mm_turbojpeg_available` at 0. The TurboJPEG policy makes the
+state fatal instead: `--mm-turbojpeg require` on the router (`SMG_MM_TURBOJPEG`
+for a process without the flag, `mm_turbojpeg` in a config file) stops the
+router at start-up, and `--mm-turbojpeg require` on the worker
+(`SMG_VLLM_MM_TURBOJPEG`, a supported spelling beside the flag, not a
+deprecated one) refuses to build smg's pipeline at launch, each with an error
+naming the library and the gauge. The router checks the policy once at
+start-up, in every routing mode, before anything binds; a worker whose
+launcher was not given the setting reads `SMG_MM_TURBOJPEG` as the router
+does. The default, `prefer`, keeps the fallback; an unreadable value stops
+start-up as an unreadable `SMG_MM_PROCESSING` does.
 
 To move fetching and processing out of the vLLM process, run the GPU-free
 sidecar next to a private Redis and point the worker at it
@@ -309,7 +334,10 @@ Worker-side media processing uses the same `--mm-processor` /
   the pipeline has no field for is refused at launch), refuses a request
   above the engine's own `--limit-mm-per-prompt` as the engine's server does
   (`--mm-max-items` and `SMG_*_MAX_COUNT` tighten those limits, never loosen
-  them), and samples a
+  them), refuses a media item whose features exceed the engine's encoder
+  budget (`mm_encoder_budget` above) before it reaches the engine, as the
+  engine's own front end does, with the item's feature tokens and the budget
+  in the same message, and samples a
   video to the engine's own frame budget (`--media-io-kwargs`
   `video.num_frames`, else its loader's default) where the family's processor
   takes the loader's frames, so a clip costs the same tokens as on the engine's
@@ -338,7 +366,7 @@ servicer; the `smg` pipeline takes image and video references and refuses an
 audio one before any work, naming the modes that take it.
 
 The in-flight cap, the saturation refusal, the advertised `mm_processor` /
-`mm_media_ref_schemes` / `mm_processor_source` and the PD prefill leg's
+`mm_media_ref_schemes` / `mm_processor_source` and the PD prefill side's
 `media_identity` behave as on the Python servicer whichever processor runs;
 the engine-side contract does not change.
 

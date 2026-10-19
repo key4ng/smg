@@ -204,9 +204,18 @@ async fn fetch_sglang_http_metadata(
     if let Ok(info) = get_model_info(client, &base, api_key).await {
         labels.extend(flat_labels(&info));
     }
+    add_models_identity(&mut labels, client, &base, api_key).await;
+    labels
+}
 
-    // /v1/models gives us model identity and max_model_len when a compatible
-    // local frontend does not expose the SGLang-specific metadata endpoints.
+/// `/v1/models` fills model identity and `max_model_len` that the engine's own
+/// metadata endpoints left out.
+async fn add_models_identity(
+    labels: &mut HashMap<String, String>,
+    client: &Client,
+    base: &str,
+    api_key: Option<&str>,
+) {
     if let Ok(models) =
         http_get_json::<ModelsResponse>(client, &format!("{base}/v1/models"), api_key).await
     {
@@ -228,8 +237,6 @@ async fn fetch_sglang_http_metadata(
             }
         }
     }
-
-    labels
 }
 
 /// TokenSpeed's control server (`ts serve --control-port`) answers
@@ -258,6 +265,7 @@ async fn fetch_tokenspeed_http_metadata(
     if let Ok(info) = get_model_info(client, &base, api_key).await {
         labels.extend(flat_labels(&info));
     }
+    add_models_identity(&mut labels, client, &base, api_key).await;
     normalize_grpc_keys(&mut labels);
     labels
 }
@@ -869,6 +877,15 @@ mod tests {
                 get(|| async {
                     Json(json!({"model_path": "/models/qwen", "weight_version": "default"}))
                 }),
+            )
+            .route(
+                "/v1/models",
+                get(|| async {
+                    Json(json!({"object": "list", "data": [{
+                        "id": "qwen-served", "object": "model", "owned_by": "self_hosted",
+                        "root": "/models/qwen", "max_model_len": 4096
+                    }]}))
+                }),
             );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -897,6 +914,8 @@ mod tests {
         assert_eq!(get("rl.pause_modes"), Some("wait,abort,keep"));
         assert_eq!(get("rl.abort"), Some("true"));
         assert_eq!(get("model_path"), Some("/models/qwen"));
+        assert_eq!(get("served_model_name"), Some("qwen-served"));
+        assert_eq!(get("max_model_len"), Some("4096"));
         for absent in ["attn_tp_size", "mapping", "kvstore_io_backend", "dp_size"] {
             assert!(
                 !labels.contains_key(absent),

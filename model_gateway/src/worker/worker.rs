@@ -378,6 +378,13 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
         Vec::new()
     }
 
+    /// Moves each time the worker is marked `NotReady` or `Failed`. A change
+    /// means its engine may have restarted, so state observed before it no
+    /// longer holds.
+    fn downs(&self) -> u64 {
+        0
+    }
+
     /// Set the worker's lifecycle status.
     fn set_status(&self, status: WorkerStatus);
 
@@ -1522,6 +1529,7 @@ impl RoutingState {
 pub struct WorkerRuntime {
     status: AtomicU8,
     cache_trace_epochs_valid: AtomicBool,
+    downs: AtomicU64,
     consecutive_failures: AtomicUsize,
     consecutive_successes: AtomicUsize,
     total_pending_probes: AtomicUsize,
@@ -1860,6 +1868,7 @@ impl WorkerRuntime {
                 initial_status,
                 WorkerStatus::NotReady | WorkerStatus::Failed
             )),
+            downs: AtomicU64::new(0),
             consecutive_failures: AtomicUsize::new(0),
             consecutive_successes: AtomicUsize::new(0),
             total_pending_probes: AtomicUsize::new(0),
@@ -2092,12 +2101,17 @@ impl WorkerRuntime {
         if matches!(status, WorkerStatus::NotReady | WorkerStatus::Failed) {
             self.cache_trace_epochs_valid
                 .store(false, Ordering::Release);
+            self.downs.fetch_add(1, Ordering::AcqRel);
         }
         self.status.store(status as u8, Ordering::Release);
     }
 
     pub fn revision(&self) -> u64 {
         self.revision.load(Ordering::Acquire)
+    }
+
+    pub fn downs(&self) -> u64 {
+        self.downs.load(Ordering::Acquire)
     }
 
     pub fn bump_revision(&self) -> u64 {
@@ -2670,6 +2684,10 @@ impl Worker for BasicWorker {
     fn set_status(&self, status: WorkerStatus) {
         self.runtime.load().set_status(status);
         Metrics::set_worker_health(self.url(), status == WorkerStatus::Ready);
+    }
+
+    fn downs(&self) -> u64 {
+        self.runtime.load().downs()
     }
 
     fn inherit_shared_state_from(&self, other: &dyn Worker) -> bool {
@@ -3475,6 +3493,29 @@ mod tests {
             assert_eq!(new.circuit_breaker_state(), CircuitState::Open);
             assert_eq!(cb_state_gauge(&handle.render()), Some(1.0));
         });
+    }
+
+    #[test]
+    fn a_worker_counts_each_time_it_goes_down() {
+        let worker = BasicWorkerBuilder::new("http://worker:8000").build();
+        assert_eq!(worker.downs(), 0);
+
+        worker.set_status(WorkerStatus::NotReady);
+        worker.set_status(WorkerStatus::Ready);
+        assert_eq!(worker.downs(), 1);
+
+        worker.set_status(WorkerStatus::Failed);
+        assert_eq!(worker.downs(), 2);
+    }
+
+    #[test]
+    fn a_replacement_keeps_the_count_of_downs() {
+        let old = BasicWorkerBuilder::new("http://worker:8000").build();
+        old.set_status(WorkerStatus::NotReady);
+        let new = BasicWorkerBuilder::new("http://worker:8000").build();
+
+        assert!(new.inherit_shared_state_from(&old));
+        assert_eq!(new.downs(), 1);
     }
 
     /// Health config that skips health checks — workers start Ready immediately.

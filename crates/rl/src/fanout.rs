@@ -21,7 +21,7 @@ use crate::{
     proxy::{call_worker, ProxyRequest},
     selector::Selector,
     state::RlState,
-    versions::stamped_by,
+    versions::{names_a_version, stamped_by},
     view::{RlWorkerInfo, RlWorkerView},
 };
 
@@ -57,6 +57,7 @@ pub async fn run_fanout(
     req: &ProxyRequest,
 ) -> RlFanoutResponse {
     let total = targets.len();
+    let before = names_a_version(req).then(|| state.view.list());
     let outcomes: Vec<(RlWorkerInfo, Result<RlCallOutcome, RlError>)> = stream::iter(targets)
         .map(|w| async move {
             let r = call_worker(state, &w, req).await;
@@ -69,8 +70,8 @@ pub async fn run_fanout(
         .iter()
         .filter_map(|(w, r)| Some((w, stamped_by(req, r.as_ref().ok()?)?)))
         .collect();
-    if !stamped.is_empty() {
-        state.versions.record(&state.view.list(), &stamped);
+    if let Some(registered) = before.filter(|_| !stamped.is_empty()) {
+        state.versions.record(&registered, &stamped);
     }
 
     let mut report = RlFanoutResponse {

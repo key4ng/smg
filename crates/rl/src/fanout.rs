@@ -21,6 +21,7 @@ use crate::{
     proxy::{call_worker, ProxyRequest},
     selector::Selector,
     state::RlState,
+    versions::stamped_by,
     view::{RlWorkerInfo, RlWorkerView},
 };
 
@@ -64,6 +65,13 @@ pub async fn run_fanout(
         .buffer_unordered(state.config.fanout_concurrency.max(1))
         .collect()
         .await;
+    let stamped: Vec<(&RlWorkerInfo, String)> = outcomes
+        .iter()
+        .filter_map(|(w, r)| Some((w, stamped_by(req, r.as_ref().ok()?)?)))
+        .collect();
+    if !stamped.is_empty() {
+        state.versions.record(&state.view.list(), &stamped);
+    }
 
     let mut report = RlFanoutResponse {
         total,
@@ -130,7 +138,7 @@ pub(crate) async fn fanout_handler(
             Ok(r) => r,
             Err(e) => return e.into_response(),
         };
-    let targets = resolve_targets(state.view.as_ref(), &selector);
+    let targets = resolve_targets(state.as_ref(), &selector);
     if targets.is_empty() {
         record_fanout("no_match", started.elapsed());
         return RlError::NoWorkersMatch(selector.source().to_string()).into_response();

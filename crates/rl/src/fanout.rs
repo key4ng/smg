@@ -130,7 +130,7 @@ pub(crate) async fn fanout_handler(
             Ok(r) => r,
             Err(e) => return e.into_response(),
         };
-    let targets = resolve_targets(state.view.as_ref(), &selector);
+    let targets = resolve_targets(state.as_ref(), &selector);
     if targets.is_empty() {
         record_fanout("no_match", started.elapsed());
         return RlError::NoWorkersMatch(selector.source().to_string()).into_response();

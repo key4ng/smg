@@ -3,11 +3,16 @@
 
 use std::sync::Arc;
 
-use crate::{config::RlConfig, view::RlWorkerView};
+use crate::{
+    config::RlConfig,
+    versions::ReportedVersions,
+    view::{RlWorkerInfo, RlWorkerView},
+};
 
 pub struct RlState {
     pub(crate) view: Arc<dyn RlWorkerView>,
     pub(crate) config: RlConfig,
+    pub(crate) versions: ReportedVersions,
 }
 
 impl RlState {
@@ -18,6 +23,25 @@ impl RlState {
     /// live on the gateway's worker objects, not on the client, so control
     /// calls leave them untouched.
     pub fn new(view: Arc<dyn RlWorkerView>, config: RlConfig) -> Self {
-        Self { view, config }
+        Self {
+            view,
+            config,
+            versions: ReportedVersions::default(),
+        }
+    }
+}
+
+/// The registry as discovery and selectors see it: each worker with the
+/// weight version the control plane last stamped on it.
+impl RlWorkerView for RlState {
+    fn list(&self) -> Vec<RlWorkerInfo> {
+        self.view
+            .list()
+            .into_iter()
+            .map(|w| self.versions.apply(w))
+            .collect()
+    }
+    fn get(&self, id: &str) -> Option<RlWorkerInfo> {
+        self.view.get(id).map(|w| self.versions.apply(w))
     }
 }

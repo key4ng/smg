@@ -25,7 +25,8 @@ use crate::{
     metrics::{op_label, record_control_call},
     path::{passthrough_query, validate_engine_path},
     state::RlState,
-    view::RlWorkerInfo,
+    versions::{engine_reports_success, stamped_version},
+    view::{RlWorkerInfo, RlWorkerView},
 };
 
 /// Largest response body kept in the envelope (bytes).
@@ -233,6 +234,11 @@ pub async fn call_worker(
         body,
         body_truncated,
     };
+    if outcome.is_success() && engine_reports_success(&outcome.body) {
+        if let Some(version) = stamped_version(&req.path, &req.body) {
+            state.versions.record(&state.view.list(), worker, &version);
+        }
+    }
     record_control_call(
         op,
         if outcome.is_success() {
@@ -264,7 +270,7 @@ pub(crate) async fn proxy_handler(
             Ok(r) => r,
             Err(e) => return e.into_response(),
         };
-    let Some(worker) = state.view.get(&id) else {
+    let Some(worker) = state.get(&id) else {
         return RlError::WorkerNotFound(id).into_response();
     };
     match call_worker(&state, &worker, &req).await {

@@ -44,9 +44,10 @@ pub(crate) fn stamped_by(req: &ProxyRequest, outcome: &RlCallOutcome) -> Option<
 }
 
 // Keyed by worker id: a worker that registers again gets a new id and reports
-// its own metadata.
+// its own metadata. Each version holds while the worker's `downs` stays what it
+// was at the refit; an engine that went down may have restarted on other weights.
 #[derive(Default)]
-pub(crate) struct ReportedVersions(Mutex<HashMap<String, String>>);
+pub(crate) struct ReportedVersions(Mutex<HashMap<String, (String, u64)>>);
 
 impl ReportedVersions {
     /// Record each called worker's stamped version for every registered rank
@@ -61,7 +62,7 @@ impl ReportedVersions {
         versions.retain(|id, _| ids.contains(id.as_str()));
         for w in registered {
             if let Some(v) = by_engine.get(w.base_url.as_str()) {
-                versions.insert(w.id.clone(), (*v).to_string());
+                versions.insert(w.id.clone(), ((*v).to_string(), w.downs));
             }
         }
     }
@@ -69,7 +70,7 @@ impl ReportedVersions {
     pub(crate) fn apply(&self, mut workers: Vec<RlWorkerInfo>) -> Vec<RlWorkerInfo> {
         let versions = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         for w in &mut workers {
-            if let Some(v) = versions.get(&w.id) {
+            if let Some((v, _)) = versions.get(&w.id).filter(|(_, downs)| *downs == w.downs) {
                 w.labels.insert(WEIGHT_VERSION.to_string(), v.clone());
             }
         }
@@ -162,6 +163,21 @@ mod tests {
 
         assert_eq!(
             versions.apply(vec![gone])[0].labels["weight_version"],
+            "default"
+        );
+    }
+
+    #[test]
+    fn a_worker_that_went_down_since_the_refit_reports_its_registration_metadata() {
+        let w = worker("w1", "http://a:1", RuntimeType::Sglang);
+        let versions = super::ReportedVersions::default();
+        versions.record(std::slice::from_ref(&w), &[(&w, "7".to_string())]);
+        let mut back = w.clone();
+        back.downs = 1;
+
+        assert_eq!(versions.apply(vec![w])[0].labels["weight_version"], "7");
+        assert_eq!(
+            versions.apply(vec![back])[0].labels["weight_version"],
             "default"
         );
     }

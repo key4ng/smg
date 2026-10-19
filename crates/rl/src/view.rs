@@ -21,6 +21,9 @@ pub struct RlWorkerInfo {
     pub worker_type: WorkerType,
     pub connection_mode: ConnectionMode,
     pub status: WorkerStatus,
+    /// How many times the worker has gone not ready or failed; a change means
+    /// its engine may have restarted.
+    pub downs: u64,
     pub is_dp_aware: bool,
     pub dp_size: Option<usize>,
     /// `WorkerSpec.labels`: discovered metadata merged with caller labels.
@@ -50,6 +53,7 @@ impl fmt::Debug for RlWorkerInfo {
             .field("worker_type", &self.worker_type)
             .field("connection_mode", &self.connection_mode)
             .field("status", &self.status)
+            .field("downs", &self.downs)
             .field("is_dp_aware", &self.is_dp_aware)
             .field("dp_size", &self.dp_size)
             .field("labels", &self.labels)
@@ -85,6 +89,7 @@ mod tests {
             worker_type: WorkerType::Regular,
             connection_mode: ConnectionMode::Http,
             status: WorkerStatus::Ready,
+            downs: 0,
             is_dp_aware: false,
             dp_size: None,
             labels: HashMap::new(),

@@ -4,13 +4,14 @@
 //! this one over it.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Mutex, PoisonError},
 };
 
+use openai_protocol::rl::RlCallOutcome;
 use serde_json::Value;
 
-use crate::view::RlWorkerInfo;
+use crate::{proxy::ProxyRequest, view::RlWorkerInfo};
 
 const WEIGHT_VERSION: &str = "weight_version";
 
@@ -32,34 +33,47 @@ pub(crate) fn stamped_version(path: &str, body: &[u8]) -> Option<String> {
     }
 }
 
-/// An engine can answer 200 with `success: false`.
-pub(crate) fn engine_reports_success(body: &Value) -> bool {
-    body.get("success") != Some(&Value::Bool(false))
+/// The version `outcome` stamped: the call succeeded (an engine can answer
+/// 200 with `success: false`) and `req` named one.
+pub(crate) fn stamped_by(req: &ProxyRequest, outcome: &RlCallOutcome) -> Option<String> {
+    let refused = outcome.body.get("success") == Some(&Value::Bool(false));
+    if !outcome.is_success() || refused {
+        return None;
+    }
+    stamped_version(&req.path, &req.body)
 }
 
-/// Keyed by worker id, so a worker that registers again (a new id) reports
-/// its own metadata.
+// Keyed by worker id: a worker that registers again gets a new id and reports
+// its own metadata.
 #[derive(Default)]
 pub(crate) struct ReportedVersions(Mutex<HashMap<String, String>>);
 
 impl ReportedVersions {
-    /// Record `version` for `called` and every registered rank of the same
-    /// engine, dropping entries of workers no longer registered.
-    pub(crate) fn record(&self, registered: &[RlWorkerInfo], called: &RlWorkerInfo, version: &str) {
+    /// Record each called worker's stamped version for every registered rank
+    /// of its engine, and drop entries of workers no longer registered.
+    pub(crate) fn record(&self, registered: &[RlWorkerInfo], stamped: &[(&RlWorkerInfo, String)]) {
+        let by_engine: HashMap<&str, &str> = stamped
+            .iter()
+            .map(|(w, v)| (w.base_url.as_str(), v.as_str()))
+            .collect();
+        let ids: HashSet<&str> = registered.iter().map(|w| w.id.as_str()).collect();
         let mut versions = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        versions.retain(|id, _| registered.iter().any(|w| &w.id == id));
-        for w in registered.iter().filter(|w| w.base_url == called.base_url) {
-            versions.insert(w.id.clone(), version.to_string());
+        versions.retain(|id, _| ids.contains(id.as_str()));
+        for w in registered {
+            if let Some(v) = by_engine.get(w.base_url.as_str()) {
+                versions.insert(w.id.clone(), (*v).to_string());
+            }
         }
-        versions.insert(called.id.clone(), version.to_string());
     }
 
-    pub(crate) fn apply(&self, mut info: RlWorkerInfo) -> RlWorkerInfo {
+    pub(crate) fn apply(&self, mut workers: Vec<RlWorkerInfo>) -> Vec<RlWorkerInfo> {
         let versions = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(v) = versions.get(&info.id) {
-            info.labels.insert(WEIGHT_VERSION.to_string(), v.clone());
+        for w in &mut workers {
+            if let Some(v) = versions.get(&w.id) {
+                w.labels.insert(WEIGHT_VERSION.to_string(), v.clone());
+            }
         }
-        info
+        workers
     }
 }
 
@@ -84,7 +98,6 @@ mod tests {
         view::{RlWorkerInfo, RlWorkerView},
     };
 
-    /// A registry view the test can change between calls.
     struct SwapView(Mutex<Vec<RlWorkerInfo>>);
 
     impl SwapView {
@@ -137,6 +150,20 @@ mod tests {
 
     async fn reported(app: &Router, id: &str) -> Value {
         send(app, "GET", &format!("/workers/{id}"), None).await.1["weight_version"].clone()
+    }
+
+    #[test]
+    fn a_worker_no_longer_registered_is_not_recorded() {
+        let gone = worker("w1", "http://a:1", RuntimeType::Sglang);
+        let still = worker("w2", "http://b:1", RuntimeType::Sglang);
+        let versions = super::ReportedVersions::default();
+
+        versions.record(std::slice::from_ref(&still), &[(&gone, "4".to_string())]);
+
+        assert_eq!(
+            versions.apply(vec![gone])[0].labels["weight_version"],
+            "default"
+        );
     }
 
     #[tokio::test]

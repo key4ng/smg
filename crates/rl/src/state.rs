@@ -35,13 +35,10 @@ impl RlState {
 /// weight version the control plane last stamped on it.
 impl RlWorkerView for RlState {
     fn list(&self) -> Vec<RlWorkerInfo> {
-        self.view
-            .list()
-            .into_iter()
-            .map(|w| self.versions.apply(w))
-            .collect()
+        self.versions.apply(self.view.list())
     }
     fn get(&self, id: &str) -> Option<RlWorkerInfo> {
-        self.view.get(id).map(|w| self.versions.apply(w))
+        let worker = self.view.get(id)?;
+        self.versions.apply(vec![worker]).pop()
     }
 }

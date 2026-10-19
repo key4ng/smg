@@ -25,7 +25,7 @@ use crate::{
     metrics::{op_label, record_control_call},
     path::{passthrough_query, validate_engine_path},
     state::RlState,
-    versions::{engine_reports_success, stamped_version},
+    versions::stamped_by,
     view::{RlWorkerInfo, RlWorkerView},
 };
 
@@ -234,11 +234,6 @@ pub async fn call_worker(
         body,
         body_truncated,
     };
-    if outcome.is_success() && engine_reports_success(&outcome.body) {
-        if let Some(version) = stamped_version(&req.path, &req.body) {
-            state.versions.record(&state.view.list(), worker, &version);
-        }
-    }
     record_control_call(
         op,
         if outcome.is_success() {
@@ -275,6 +270,11 @@ pub(crate) async fn proxy_handler(
     };
     match call_worker(&state, &worker, &req).await {
         Ok(outcome) => {
+            if let Some(version) = stamped_by(&req, &outcome) {
+                state
+                    .versions
+                    .record(&state.view.list(), &[(&worker, version)]);
+            }
             let status = StatusCode::from_u16(outcome.status).unwrap_or(StatusCode::BAD_GATEWAY);
             (status, Json(outcome)).into_response()
         }

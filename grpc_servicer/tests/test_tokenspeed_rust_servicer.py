@@ -351,6 +351,27 @@ def test_server_facts_carry_labels_window_and_kv_events(monkeypatch):
 
 
 @dataclasses.dataclass
+class _TpServerArgs(FakeServerArgs):
+    attn_tp_size: int | None = None
+
+
+def test_server_facts_carry_the_resolved_tp_width(monkeypatch):
+    _stub_servicer_module(monkeypatch)
+    args = _TpServerArgs(mapping=SimpleNamespace(attn=SimpleNamespace(tp_size=2, dp_size=1)))
+    assert json.loads(rust.server_facts(args)["server_args_json"])["attn_tp_size"] == 2
+    plain = json.loads(rust.server_facts(_TpServerArgs())["server_args_json"])
+    assert plain.get("attn_tp_size") is None
+
+
+def test_server_facts_pass_the_engines_own_field_through_under_attention_dp(monkeypatch):
+    _stub_servicer_module(monkeypatch)
+    args = _TpServerArgs(
+        attn_tp_size=2, mapping=SimpleNamespace(attn=SimpleNamespace(tp_size=2, dp_size=4))
+    )
+    assert json.loads(rust.server_facts(args)["server_args_json"])["attn_tp_size"] == 2
+
+
+@dataclasses.dataclass
 class _ReasoningServerArgs(FakeServerArgs):
     reasoning_parser: str | None = None
 

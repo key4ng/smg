@@ -118,6 +118,33 @@ def test_the_attention_dp_width_is_a_count_or_none(mapping, expected):
     assert EngineConfigView(args).server_args.attention_dp_size == expected
 
 
+def _attn(**kw):
+    return SimpleNamespace(attn=SimpleNamespace(**kw))
+
+
+@pytest.mark.parametrize(
+    ("field", "mapping", "expected"),
+    [
+        # The resolved width, read off the mapping where the layout is plain.
+        (None, _attn(tp_size=2, dp_size=1), 2),
+        (2, _attn(tp_size=4, dp_size=1), 4),
+        (None, _attn(tp_size=0), None),
+        # No resolved layout: nothing is read (the engine's own field goes out as is).
+        (2, None, None),
+        (None, None, None),
+        # Attention DP or context parallelism: the attention width is narrower
+        # than the engine's, so nothing is read.
+        (None, _attn(tp_size=2, dp_size=4), None),
+        (None, _attn(tp_size=4, qcp_size=2), None),
+        (None, _attn(tp_size=4, kvp_size=2), None),
+    ],
+)
+def test_the_tp_width_is_read_off_a_plain_resolved_layout(field, mapping, expected):
+    args = _server_args(attn_tp_size=field)
+    args.mapping = mapping
+    assert EngineConfigView(args).server_args.tp_size == expected
+
+
 def test_the_running_window_takes_either_spelling_and_reads_zero_when_unset():
     assert EngineConfigView(SimpleNamespace(max_num_seqs=16)).server_args.running_window == 16
     assert (

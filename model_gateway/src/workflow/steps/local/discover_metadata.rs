@@ -270,8 +270,9 @@ async fn fetch_tokenspeed_http_metadata(
     labels
 }
 
-/// The JSON twin of the gRPC path's `pick_prost_fields`: non-empty strings,
-/// booleans, and non-zero numbers (whole ones written as integers).
+/// The JSON twin of the gRPC path's `pick_prost_fields`: non-empty strings
+/// other than a stringified `"null"`, booleans, and non-zero numbers (whole
+/// ones written as integers).
 fn pick_json_fields(
     labels: &mut HashMap<String, String>,
     args: &serde_json::Map<String, serde_json::Value>,
@@ -279,7 +280,7 @@ fn pick_json_fields(
 ) {
     for key in keys {
         let value = match args.get(*key) {
-            Some(serde_json::Value::String(s)) if !s.is_empty() => s.clone(),
+            Some(serde_json::Value::String(s)) if !s.is_empty() && s != "null" => s.clone(),
             Some(serde_json::Value::Bool(b)) => b.to_string(),
             Some(serde_json::Value::Number(n)) => match n.as_f64() {
                 Some(f) if f != 0.0 && f.fract() == 0.0 => (f as i64).to_string(),
@@ -844,9 +845,6 @@ mod tests {
         assert!(!labels.contains_key("max_running_requests"));
     }
 
-    /// An HTTP TokenSpeed worker takes the labels the gRPC path takes from the
-    /// same engine: its parallelism (normalized) and its RL advertisement, not
-    /// the rest of its 200-odd server args.
     #[tokio::test]
     async fn tokenspeed_http_metadata_takes_the_engines_advertisement() {
         use axum::{routing::get, Json, Router};
@@ -864,6 +862,8 @@ mod tests {
                         "pipeline_parallel_size": 1.0,
                         "data_parallel_size": null,
                         "kvstore_io_backend": "kernel",
+                        "disaggregation_mode": "null",
+                        "served_model_name": "null",
                         "mapping": {"attn": {"tp_size": 2.0}},
                         "rl.control_url": "http://0.0.0.0:48225",
                         "rl.update_from": "disk,distributed,mooncake",
@@ -916,7 +916,13 @@ mod tests {
         assert_eq!(get("model_path"), Some("/models/qwen"));
         assert_eq!(get("served_model_name"), Some("qwen-served"));
         assert_eq!(get("max_model_len"), Some("4096"));
-        for absent in ["attn_tp_size", "mapping", "kvstore_io_backend", "dp_size"] {
+        for absent in [
+            "attn_tp_size",
+            "mapping",
+            "kvstore_io_backend",
+            "dp_size",
+            "disaggregation_mode",
+        ] {
             assert!(
                 !labels.contains_key(absent),
                 "{absent} should not be a label"

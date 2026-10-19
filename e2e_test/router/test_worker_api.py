@@ -504,13 +504,13 @@ class TestWorkerAPIRestSemantics:
     """Tests for proper REST semantics on worker management endpoints.
 
     Verifies:
-    - POST /workers with a registered URL: same spec is done (200), a different one is a 409
+    - POST /workers returns 409 on duplicate URL
     - PUT /workers/{id} does full replace
     - PATCH /workers/{id} does partial update
     """
 
-    def test_post_duplicate_url(self):
-        """A repeated POST with the same spec is done (200, same id); a different spec is a 409."""
+    def test_post_duplicate_url_returns_409(self):
+        """POST /workers with the same URL twice should return 409 Conflict."""
         engine = os.environ.get("E2E_ENGINE", "sglang")
         http_workers = start_workers(
             "meta-llama/Llama-3.1-8B-Instruct", engine, mode=ConnectionMode.HTTP, count=1
@@ -523,30 +523,25 @@ class TestWorkerAPIRestSemantics:
             gateway.start(igw_mode=True)
 
             try:
+                # First POST — should succeed
                 success, worker_id = gateway.add_worker(http_worker.base_url)
                 assert success, f"First POST should succeed: {worker_id}"
                 logger.info("First POST succeeded: worker_id=%s", worker_id)
 
+                # Second POST with same URL — should return 409
                 resp = httpx.post(
                     f"{gateway.base_url}/workers",
                     json={"url": http_worker.base_url},
                     timeout=10,
                 )
-                assert resp.status_code == 200, (
-                    f"Expected 200 on a repeated POST, got {resp.status_code}: {resp.text}"
-                )
-                assert resp.json()["worker_id"] == worker_id, resp.text
-
-                resp = httpx.post(
-                    f"{gateway.base_url}/workers",
-                    json={"url": http_worker.base_url, "priority": 1},
-                    timeout=10,
-                )
                 assert resp.status_code == 409, (
-                    f"Expected 409 on a different spec, got {resp.status_code}: {resp.text}"
+                    f"Expected 409 Conflict on duplicate URL, got {resp.status_code}: {resp.text}"
                 )
-                assert "WORKER_ALREADY_EXISTS" in resp.json().get("code", ""), resp.text
-                logger.info("Repeated POST answered 200; a different spec 409")
+                error_data = resp.json()
+                assert "WORKER_ALREADY_EXISTS" in error_data.get("code", ""), (
+                    f"Expected WORKER_ALREADY_EXISTS error code, got: {error_data}"
+                )
+                logger.info("Duplicate POST correctly returned 409: %s", error_data)
             finally:
                 gateway.shutdown()
         finally:

@@ -74,16 +74,12 @@ pub enum Job {
 }
 
 impl Job {
-    pub const ADD_WORKER: &'static str = "AddWorker";
-    pub const UPDATE_WORKER: &'static str = "UpdateWorker";
-    pub const REMOVE_WORKER: &'static str = "RemoveWorker";
-
     /// Get job type as string for logging
     pub fn job_type(&self) -> &'static str {
         match self {
-            Job::AddWorker { .. } => Self::ADD_WORKER,
-            Job::UpdateWorker { .. } => Self::UPDATE_WORKER,
-            Job::RemoveWorker { .. } => Self::REMOVE_WORKER,
+            Job::AddWorker { .. } => "AddWorker",
+            Job::UpdateWorker { .. } => "UpdateWorker",
+            Job::RemoveWorker { .. } => "RemoveWorker",
             Job::InitializeWorkersFromConfig { .. } => "InitializeWorkersFromConfig",
             Job::InitializeMcpServers { .. } => "InitializeMcpServers",
             Job::RegisterMcpServer { .. } => "RegisterMcpServer",
@@ -1046,12 +1042,6 @@ mod tests {
             JobStatus::pending("RegisterMcpServer", "http://w:8000"),
         );
         assert!(JobQueue::claim(&map, "http://w:8000", "AddWorker"));
-    }
-
-    impl JobQueue {
-        pub(crate) fn set_status_for_test(&self, status: JobStatus) {
-            self.status_map.insert(status.worker_url.clone(), status);
-        }
     }
 
     /// A submission that fails must not leave its claim behind, or the next

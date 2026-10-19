@@ -254,9 +254,7 @@ async fn fetch_tokenspeed_http_metadata(
             .await
     {
         pick_json_fields(&mut labels, &args, TOKENSPEED_GRPC_KEYS);
-        if let Some(width) = engine_tp_size(&args).filter(|_| !labels.contains_key("tp_size")) {
-            labels.insert("tp_size".to_string(), width.to_string());
-        }
+        fill_layout_labels(&mut labels, &args);
         if let Some(version) = args
             .get("tokenspeed_version")
             .and_then(serde_json::Value::as_str)
@@ -273,18 +271,34 @@ async fn fetch_tokenspeed_http_metadata(
     labels
 }
 
-/// The engine-wide TP width, SGLang's `tp_size`: TokenSpeed's control server
-/// reports no `tp_size`, only its resolved `mapping`, whose attention layout
-/// spans every GPU of a stage as `tp_size x dp_size`.
-fn engine_tp_size(args: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
-    let attn = args.get("mapping")?.get("attn")?;
+/// TokenSpeed's control server reports its resolved layout only as `mapping`.
+/// Fill the widths the engine did not report itself: the engine-wide `tp_size`
+/// (SGLang's convention; the attention layout spans every GPU of a stage as
+/// `tp_size x dp_size`) and the attention width `attn_tp_size`.
+fn fill_layout_labels(
+    labels: &mut HashMap<String, String>,
+    args: &serde_json::Map<String, serde_json::Value>,
+) {
+    let Some(attn) = args.get("mapping").and_then(|m| m.get("attn")) else {
+        return;
+    };
     let width = |key: &str| {
         attn.get(key)
             .and_then(serde_json::Value::as_f64)
             .filter(|w| *w >= 1.0 && w.fract() == 0.0)
             .map(|w| w as u64)
     };
-    Some(width("tp_size")? * width("dp_size").unwrap_or(1))
+    let Some(attn_tp) = width("tp_size") else {
+        return;
+    };
+    if let Some(engine) = attn_tp.checked_mul(width("dp_size").unwrap_or(1)) {
+        labels
+            .entry("tp_size".to_string())
+            .or_insert_with(|| engine.to_string());
+    }
+    labels
+        .entry("attn_tp_size".to_string())
+        .or_insert_with(|| attn_tp.to_string());
 }
 
 /// The JSON twin of the gRPC path's `pick_prost_fields`: non-empty strings
@@ -685,7 +699,8 @@ mod tests {
     use super::*;
 
     /// Every engine's spelling of the parallelism widths folds into the
-    /// canonical labels, and an existing canonical label is never overwritten.
+    /// canonical labels, an existing canonical label is never overwritten, and
+    /// TokenSpeed's attention width stays a label of its own, not `tp_size`.
     #[test]
     fn normalize_grpc_keys_canonicalises_every_parallelism_spelling() {
         let mut labels: HashMap<String, String> = [
@@ -947,6 +962,44 @@ mod tests {
                 "{absent} should not be a label"
             );
         }
+    }
+
+    fn layout(args: serde_json::Value, reported: &[(&str, &str)]) -> HashMap<String, String> {
+        let mut labels: HashMap<String, String> = reported
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        fill_layout_labels(&mut labels, args.as_object().unwrap());
+        labels
+    }
+
+    #[test]
+    fn the_layout_labels_come_from_the_mapping_when_the_engine_reports_none() {
+        let labels = layout(
+            serde_json::json!({"mapping": {"attn": {"tp_size": 2.0, "dp_size": 4.0}}}),
+            &[],
+        );
+        assert_eq!(labels.get("tp_size").map(String::as_str), Some("8"));
+        assert_eq!(labels.get("attn_tp_size").map(String::as_str), Some("2"));
+    }
+
+    #[test]
+    fn the_widths_the_engine_reports_win_over_the_mapping() {
+        let labels = layout(
+            serde_json::json!({"mapping": {"attn": {"tp_size": 2.0, "dp_size": 4.0}}}),
+            &[("tp_size", "4"), ("attn_tp_size", "1")],
+        );
+        assert_eq!(labels.get("tp_size").map(String::as_str), Some("4"));
+        assert_eq!(labels.get("attn_tp_size").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn an_overflowing_mapping_gives_no_engine_width() {
+        let labels = layout(
+            serde_json::json!({"mapping": {"attn": {"tp_size": 1.0e19, "dp_size": 4.0}}}),
+            &[],
+        );
+        assert!(!labels.contains_key("tp_size"), "{labels:?}");
     }
 
     #[tokio::test]

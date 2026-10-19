@@ -90,6 +90,16 @@ def test_the_engine_wide_tp_width_is_advertised(
     assert _advertised_tp(info) == expected
 
 
+def test_the_resolved_attention_width_is_advertised_beside_it(tokenspeed_servicer_mod, monkeypatch):
+    info = _server_info(
+        tokenspeed_servicer_mod,
+        monkeypatch,
+        attn_tp_size=None,
+        mapping=SimpleNamespace(attn=SimpleNamespace(world_size=8, tp_size=2, dp_size=4)),
+    )
+    assert (_advertised_tp(info), info.server_args["attn_tp_size"]) == (8, 2)
+
+
 def test_no_tp_width_is_advertised_without_a_resolved_layout(tokenspeed_servicer_mod, monkeypatch):
     info = _server_info(tokenspeed_servicer_mod, monkeypatch, attn_tp_size=2)
     assert _advertised_tp(info) is None

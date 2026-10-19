@@ -365,6 +365,16 @@ def test_server_facts_carry_the_engine_wide_tp_width(monkeypatch):
     assert plain.get("tp_size") is None
 
 
+def test_server_facts_carry_the_resolved_attention_width(monkeypatch):
+    # tp_size alone hides the attention split where dp_size is not advertised.
+    _stub_servicer_module(monkeypatch)
+    args = _TpServerArgs(
+        mapping=SimpleNamespace(attn=SimpleNamespace(world_size=8, tp_size=2, dp_size=4))
+    )
+    facts = json.loads(rust.server_facts(args)["server_args_json"])
+    assert (facts["tp_size"], facts["attn_tp_size"]) == (8, 2)
+
+
 def test_server_facts_keep_the_attention_width_as_its_own_field(monkeypatch):
     _stub_servicer_module(monkeypatch)
     args = _TpServerArgs(

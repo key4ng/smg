@@ -82,7 +82,6 @@ use crate::{
     worker::{
         admin_json::AdminJson,
         manager::{WorkerManager, WorkerManagerConfig},
-        service::WorkerRequest,
         ConnectionMode,
     },
     workflow::{
@@ -842,13 +841,9 @@ async fn get_loads(
 
 async fn create_worker(
     State(state): State<Arc<AppState>>,
-    AdminJson(body): AdminJson<Value>,
+    AdminJson(config): AdminJson<WorkerSpec>,
 ) -> Response {
-    let request = match WorkerRequest::from_body(body) {
-        Ok(request) => request,
-        Err(err) => return err.into_response(),
-    };
-    match state.context.worker_service.create_worker(request).await {
+    match state.context.worker_service.create_worker(config).await {
         Ok(result) => result.into_response(),
         Err(err) => err.into_response(),
     }

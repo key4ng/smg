@@ -378,7 +378,7 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
         Vec::new()
     }
 
-    /// How many times the worker has gone `NotReady` or `Failed`. A change
+    /// Moves each time the worker is marked `NotReady` or `Failed`. A change
     /// means its engine may have restarted, so state observed before it no
     /// longer holds.
     fn downs(&self) -> u64 {

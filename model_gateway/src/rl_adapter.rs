@@ -115,6 +115,7 @@ impl RegistryRlView {
             connection_mode: *worker.connection_mode(),
             status: worker.status(),
             downs: worker.downs(),
+            revision: worker.revision(),
             is_dp_aware: worker.is_dp_aware(),
             dp_size: worker.dp_size(),
             labels: spec.labels.clone(),

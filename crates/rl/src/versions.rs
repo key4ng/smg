@@ -43,15 +43,24 @@ pub(crate) fn stamped_by(req: &ProxyRequest, outcome: &RlCallOutcome) -> Option<
     stamped_version(&req.path, &req.body)
 }
 
+/// Whether `req` names a version a successful call would stamp, so the caller
+/// takes the registry snapshot to record against before it calls.
+pub(crate) fn names_a_version(req: &ProxyRequest) -> bool {
+    stamped_version(&req.path, &req.body).is_some()
+}
+
 // Keyed by worker id: a worker that registers again gets a new id and reports
-// its own metadata. Each version holds while the worker's `downs` stays what it
-// was at the refit; an engine that went down may have restarted on other weights.
+// its own metadata. Each version holds while the worker's `downs` and
+// `revision` stay what they were before the refit was sent: an engine that went
+// down may have restarted on other weights, and a same-URL replacement brings
+// its own spec.
 #[derive(Default)]
-pub(crate) struct ReportedVersions(Mutex<HashMap<String, (String, u64)>>);
+pub(crate) struct ReportedVersions(Mutex<HashMap<String, (String, u64, u64)>>);
 
 impl ReportedVersions {
-    /// Record each called worker's stamped version for every registered rank
-    /// of its engine, and drop entries of workers no longer registered.
+    /// Record each called worker's stamped version for every rank of its engine
+    /// in `registered`, the snapshot taken before the calls, and drop entries
+    /// of workers not in it.
     pub(crate) fn record(&self, registered: &[RlWorkerInfo], stamped: &[(&RlWorkerInfo, String)]) {
         let by_engine: HashMap<&str, &str> = stamped
             .iter()
@@ -62,7 +71,7 @@ impl ReportedVersions {
         versions.retain(|id, _| ids.contains(id.as_str()));
         for w in registered {
             if let Some(v) = by_engine.get(w.base_url.as_str()) {
-                versions.insert(w.id.clone(), ((*v).to_string(), w.downs));
+                versions.insert(w.id.clone(), ((*v).to_string(), w.downs, w.revision));
             }
         }
     }
@@ -70,7 +79,10 @@ impl ReportedVersions {
     pub(crate) fn apply(&self, mut workers: Vec<RlWorkerInfo>) -> Vec<RlWorkerInfo> {
         let versions = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         for w in &mut workers {
-            if let Some((v, _)) = versions.get(&w.id).filter(|(_, downs)| *downs == w.downs) {
+            let current = |(_, downs, revision): &&(String, u64, u64)| {
+                *downs == w.downs && *revision == w.revision
+            };
+            if let Some((v, _, _)) = versions.get(&w.id).filter(current) {
                 w.labels.insert(WEIGHT_VERSION.to_string(), v.clone());
             }
         }
@@ -180,6 +192,44 @@ mod tests {
             versions.apply(vec![back])[0].labels["weight_version"],
             "default"
         );
+    }
+
+    #[test]
+    fn a_worker_replaced_since_the_refit_reports_its_new_metadata() {
+        let w = worker("w1", "http://a:1", RuntimeType::Sglang);
+        let versions = super::ReportedVersions::default();
+        versions.record(std::slice::from_ref(&w), &[(&w, "7".to_string())]);
+        let mut replaced = w.clone();
+        replaced.revision = 1;
+
+        assert_eq!(
+            versions.apply(vec![replaced])[0].labels["weight_version"],
+            "default"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_engine_that_goes_down_during_its_refit_does_not_report_it() {
+        let e = FakeEngine::start(StatusCode::OK, json!({"success": true}), 300).await;
+        let view = SwapView::new(vec![worker("w1", &e.url, RuntimeType::Sglang)]);
+        let app = app(Arc::clone(&view));
+        let mut down = worker("w1", &e.url, RuntimeType::Sglang);
+        down.downs = 1;
+
+        let refit = send(
+            &app,
+            "POST",
+            "/workers/w1/engine/update_weights_from_disk",
+            Some(json!({"model_path": "/m", "weight_version": "7"})),
+        );
+        let restart = async {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            view.replace(vec![down]);
+        };
+        let ((status, _), ()) = tokio::join!(refit, restart);
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reported(&app, "w1").await, "default");
     }
 
     #[tokio::test]

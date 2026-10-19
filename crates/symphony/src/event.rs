@@ -72,9 +72,20 @@ pub enum DropReason {
     Whitespace,
     /// A call after the first, where the request takes one call only ([`first_call_only`]).
     LaterCall,
+    /// Bytes of a call block the call syntax could not read as the call, for a syntax whose block
+    /// is never prose (the keyed syntax: the block's markers and its four tags are the format's
+    /// own tokens, and what stands between them where the syntax has no place for text is the
+    /// model's failed call). A `Malformed` event of no bytes with the reason stands right before
+    /// them, or, for a call the end of the stream or a marker cut, right after them and before
+    /// its `ToolCallEnd` (`tagged::end_cut_call`), so the failure is counted; the bytes
+    /// themselves never reach a client as content.
+    MalformedCall,
 }
 
-/// Why a region could not be parsed. Its text is returned, never lost.
+/// Why a region could not be parsed. Its text is returned, never lost: with the event, or, for a
+/// call syntax whose block is never prose, as `Dropped { MalformedCall }` beside an event of no
+/// bytes, right after it, or right before it and the call's end where a cut ended the call
+/// ([`DropReason::MalformedCall`]).
 ///
 /// The set is closed: every reason a parser gives is one of these, so a reader can count them
 /// and a client can match on them; a new reason is a new variant. [`Display`](std::fmt::Display)
@@ -85,7 +96,9 @@ pub enum DropReason {
 pub enum MalformedReason {
     /// The stream ended inside a region that never closed.
     UnterminatedRegion,
-    /// Tool-call arguments did not parse under the format's argument syntax.
+    /// Tool-call arguments did not parse under the format's argument syntax. From a JSON syntax
+    /// the event carries no bytes and stands where the arguments stopped being JSON; the call's
+    /// fragments carry every byte the model wrote.
     InvalidArguments,
     /// A tool call named a function the request did not declare.
     UnknownTool,
@@ -142,6 +155,11 @@ pub enum MalformedReason {
     BlockWithoutACompleteCall,
     /// Arguments with no forced function to name them.
     NoForcedFunction,
+    /// A marker of the table in a content state no row leads out of on it, kept as that state's
+    /// text where the model put it (an answer's opener written again inside the answer, a close
+    /// with nothing open). The event carries no bytes and stands before the marker's text: a frame
+    /// the table did not read is counted without a byte moving.
+    MarkerOutOfPlace,
 }
 
 impl MalformedReason {
@@ -178,6 +196,7 @@ impl MalformedReason {
                 "a tool-call block that closed without a complete call"
             }
             Self::NoForcedFunction => "arguments with no forced function to name them",
+            Self::MarkerOutOfPlace => "a marker of the table where no row leads, kept as text",
         }
     }
 }
@@ -227,8 +246,12 @@ pub enum Event {
         /// The output bytes this event accounts for: the opening marker and the name as written.
         source: Text,
     },
-    /// A fragment of the call's arguments. Concatenated fragments for one index are always a
-    /// valid JSON prefix and equal the final arguments when the call ends.
+    /// A fragment of the call's arguments. Concatenated fragments for one index are a prefix of
+    /// JSON a strict reader accepts (a number out of the reader's range excepted: the prefix judge
+    /// reads a number's grammar, not its size) until a `Malformed { InvalidArguments }` event of
+    /// no bytes says where they stopped being one, from which the fragments are the model's bytes
+    /// as written (`json` equal to `source`), and equal the final arguments when the call ends: a
+    /// call whose arguments are no whole JSON says so by a `Malformed` event before its end.
     ToolCallArguments {
         /// Which call the fragment belongs to.
         index: u32,

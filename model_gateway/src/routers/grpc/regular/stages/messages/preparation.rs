@@ -30,7 +30,7 @@ use crate::{
 /// tokenizes, and builds tool constraints.
 pub(crate) struct MessagePreparationStage {
     /// The pools whose workers this pipeline's requests can reach (the
-    /// mode's legs): the multimodal wire dtype is resolved over them.
+    /// mode's pools): the multimodal wire dtype is resolved over them.
     wire_pools: &'static [RoutingPool],
 }
 
@@ -189,7 +189,7 @@ impl MessagePreparationStage {
                 // switched off, `SMG_MM_ONE_PASS_WIRE=0`): the preprocessor
                 // then writes it directly; otherwise `None`, and the write
                 // happens at assembly. Resolved over the pools of this
-                // pipeline's mode, the legs the pixels can reach, as the
+                // pipeline's mode, the pools the pixels can reach, as the
                 // selection draws them.
                 let image_wire_dtype = multimodal::mm_shared_image_wire_dtype_over(
                     &ctx.components.worker_registry,
@@ -197,12 +197,16 @@ impl MessagePreparationStage {
                     self.wire_pools,
                 );
                 // The frames decode under the destination engine's own
-                // transparency rule, resolved over the same legs as the dtype.
+                // transparency rule, resolved over the same pools as the dtype.
                 let transparency = multimodal::engine_transparency_policy(
                     &ctx.components.worker_registry,
                     model_id,
                     self.wire_pools,
                 );
+                // The engine's per-item bound, the smallest its workers
+                // advertise: an item above it would never be scheduled.
+                let encoder_budget =
+                    multimodal::engine_encoder_budget(&ctx.components.worker_registry, model_id);
                 match multimodal::process_multimodal_plan(
                     media_plan,
                     model_id,
@@ -213,6 +217,7 @@ impl MessagePreparationStage {
                     &tokenizer_source,
                     image_wire_dtype,
                     transparency,
+                    encoder_budget,
                 )
                 .await
                 {
@@ -226,13 +231,12 @@ impl MessagePreparationStage {
                         multimodal_intermediate = Some(output.intermediate);
                     }
                     Err(e) => {
-                        let message = multimodal::processing_failed_message(&e);
                         error!(
                             function = "MessagePreparationStage::execute",
-                            error = %message,
+                            error = %multimodal::processing_failed_message(&e),
                             "Multimodal processing failed"
                         );
-                        return Err(error::bad_request("multimodal_processing_failed", message));
+                        return Err(multimodal::processing_failed_response(&e));
                     }
                 }
             }
@@ -261,7 +265,8 @@ impl MessagePreparationStage {
             &request.model,
             &ctx.components.templates,
             &processed_messages.text,
-        );
+        )
+        .is_some_and(|thought| thought.open);
         let workers = ctx
             .components
             .worker_registry
@@ -299,24 +304,31 @@ impl MessagePreparationStage {
             (prepared, _) => prepared,
         };
 
-        let legacy_parser_needs_special_tokens = utils::reasoning_parser_requires_special_tokens(
-            &ctx.components.reasoning_parser_factory,
-            ctx.components
-                .parser_resolver
-                .reasoning_parser(&request.model)
-                .as_deref(),
-            &request.model,
-        );
+        let json_schema_constraint =
+            matches!(&tool_call_constraint, Ok(Some(c)) if c.is_json_schema());
         // A Symphony table whose markers the decoder would drop as special tokens needs them
-        // kept: without them the table reads neither the thought nor the calls.
-        let preserve_reasoning_special_tokens = legacy_parser_needs_special_tokens
-            || symphony::keeps_special_tokens(
-                parser,
-                &names,
+        // kept: without them the table reads neither the thought nor the calls. Where a table
+        // reads the message its markers alone decide, and no legacy reasoning parser is built to
+        // be asked; under a JSON-schema constraint no table reads (request building makes no
+        // assignment: `regular::symphony::assign_messages`), so the legacy parsers answer for
+        // themselves, as they do where no table reads at all.
+        let preserve_reasoning_special_tokens = match symphony::keeps_special_tokens(
+            parser,
+            &names,
+            &request.model,
+            &ctx.components.templates,
+            &tokenizer,
+        ) {
+            Some(kept) if !json_schema_constraint => kept,
+            _ => utils::reasoning_parser_requires_special_tokens(
+                &ctx.components.reasoning_parser_factory,
+                ctx.components
+                    .parser_resolver
+                    .reasoning_parser(&request.model)
+                    .as_deref(),
                 &request.model,
-                &ctx.components.templates,
-                &tokenizer,
-            );
+            ),
+        };
 
         // Derive skip_special_tokens from parser and constraint type:
         // - typed reasoning parsers need their control tokens preserved

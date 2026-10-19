@@ -79,7 +79,7 @@ pub struct Engine {
 /// them; so one that arrives while bytes are held is placed where it arrived once the event that
 /// carries the bytes around it comes: spliced into a call event's source, which no client reads,
 /// or split out of a text event as a `Dropped { Wrapper }` event of its own between the text's
-/// pieces ([`Engine::carried_into`]). The output's bytes leave in their order whatever the syntax
+/// pieces ([`Engine::push_carried_out`]). The output's bytes leave in their order whatever the syntax
 /// holds. When nothing is held it is dropped where it stands.
 #[derive(Debug, Default)]
 struct Region {
@@ -183,6 +183,15 @@ pub(crate) trait CallAssembler: std::fmt::Debug + Send + Sync {
         true
     }
 
+    /// The whitespace the region ends with after its last call, which is the template's wrapping
+    /// and nothing of the call's: the engine drops it as it drops wrapping everywhere else, before
+    /// the region's close, so a region's common end costs no event of the syntax's. Taken from
+    /// the syntax, so neither ending says it again. Every syntax but the tagged one hands back
+    /// nothing and reports what it holds at its ending.
+    fn trailing_whitespace(&mut self) -> String {
+        String::new()
+    }
+
     /// The region closed: `terminal` is the table's terminal that closed it, the call's own closing
     /// marker, the next call's opener or the block's close. The call ends as the syntax has it, and
     /// the answer says whether the terminal's bytes were taken as the call's end (`ToolCallEnd`'s
@@ -238,45 +247,57 @@ fn assembler(
     values: Values,
     declared: &Declared,
 ) -> Box<dyn CallAssembler> {
-    let id = ids.id(index);
+    // The id is minted where a syntax takes one at its making; the tagged and the list syntaxes
+    // mint each call's as it starts.
+    let id = || ids.id(index);
     match syntax {
         // `None` is unreachable: `Format::validate`, run by `Engine::new`, refuses a table with
         // an arguments state and no call syntax. The arm keeps the match total.
-        Some(CallSyntax::Json) | None => Box::new(json::Assembler::new(index, id)),
+        Some(CallSyntax::Json) | None => Box::new(json::Assembler::new(index, id())),
         Some(CallSyntax::Tagged(_, placement)) => {
-            Box::new(tagged::Assembler::new(index, id, placement))
+            Box::new(tagged::Assembler::new(index, ids, placement))
         }
-        Some(CallSyntax::Keyed(tags)) => Box::new(tagged::keyed::Assembler::new(index, id, tags)),
-        Some(CallSyntax::Pythonic(_)) => Box::new(pythonic::Assembler::new(index, ids)),
+        Some(CallSyntax::Keyed(tags)) => Box::new(tagged::keyed::Assembler::new(index, id(), tags)),
+        // The list between markers (Olmo 3, LFM2.5) reads what the markers frame; the bare list
+        // the output starts in (Llama 4) reads the turn's content before it and the wrapping
+        // after it.
+        Some(CallSyntax::Pythonic(dialect)) if framed => {
+            Box::new(pythonic::Assembler::new(index, ids, dialect))
+        }
+        Some(CallSyntax::Pythonic(dialect)) => {
+            Box::new(pythonic::Assembler::bare(index, ids, dialect))
+        }
         // The list between markers (Llama Nemotron) takes text in place of it as malformed; the
         // bare list the output starts in (xLAM) takes it for prose.
         Some(CallSyntax::JsonList) if framed => Box::new(json::list::Assembler::framed(index, ids)),
         Some(CallSyntax::JsonList) => Box::new(json::list::Assembler::new(index, ids)),
-        Some(CallSyntax::JsonAlone) => Box::new(json::list::Assembler::object_or_list(index, ids)),
-        Some(CallSyntax::Xml) => Box::new(tagged::xml::Assembler::new(index, id)),
+        Some(CallSyntax::JsonAlone(opener)) => {
+            Box::new(json::list::Assembler::object_or_list(index, ids, opener))
+        }
+        Some(CallSyntax::Xml) => Box::new(tagged::xml::Assembler::new(index, id())),
         Some(CallSyntax::Attributed(tags)) => {
-            Box::new(tagged::attributed::Assembler::new(index, id, tags))
+            Box::new(tagged::attributed::Assembler::new(index, id(), tags))
         }
         // The named call: a tool's name, a marker, then the call's object or its arguments alone.
         Some(CallSyntax::NamedJson(marker)) => Box::new(json::named::Assembler::new(
             index,
-            id,
+            id(),
             marker,
             json::named::After::Object,
         )),
         Some(CallSyntax::NamedArguments(marker)) => Box::new(json::named::Assembler::new(
             index,
-            id,
+            id(),
             marker,
             json::named::After::Arguments,
         )),
-        Some(CallSyntax::ForcedArguments) => Box::new(json::forced::Assembler::new(index, id)),
-        Some(CallSyntax::Gemma(spelling)) => Box::new(gemma::Assembler::new(index, id, spelling)),
+        Some(CallSyntax::ForcedArguments) => Box::new(json::forced::Assembler::new(index, id())),
+        Some(CallSyntax::Gemma(spelling)) => Box::new(gemma::Assembler::new(index, id(), spelling)),
         // A shaped call opens through its terminal's header, which the engine reads before it
         // enters the call's state with that assembler (`Engine::open_shaped`); a table that
         // validates enters the state no other way.
         Some(CallSyntax::Shaped(shape)) => Box::new(ShapedCall {
-            call: shape::Assembler::new(index, id, shape, values, None)
+            call: shape::Assembler::new(index, id(), shape, values, None)
                 .with_call_id(CallId::Minted, &[]),
             declared: declared.clone(),
         }),
@@ -575,7 +596,7 @@ impl Engine {
             .call
             .as_mut()
             .map_or_else(String::new, |call| call.start(&mut started));
-        self.push_call_events(started, out);
+        self.push_call_events(started.drain(), out);
         // The header's bytes went to the shape, not through `feed`: the start's events carried
         // them out, so the region counts them as taken too.
         self.region.fed = self.region.fed.max(self.region.out);
@@ -623,7 +644,7 @@ impl Engine {
                 let mut assembled = Events::new();
                 let taken = call.feed(text, &self.declared, &mut assembled);
                 self.region.fed += taken;
-                self.push_call_events(assembled, out);
+                self.push_call_events(assembled.drain(), out);
                 self.wrapping(&text[taken..], MalformedReason::TextAfterTheArguments, out);
             }
             Emits::Wrapper => self.wrapping(text, MalformedReason::TextBetweenCalls, out),
@@ -757,7 +778,7 @@ impl Engine {
                 if let Some(call) = &mut self.call {
                     let mut events = Events::new();
                     call.ignored(&text, &self.declared, &mut events);
-                    self.push_call_events(events, out);
+                    self.push_call_events(events.drain(), out);
                     if self.region.out < self.region.fed {
                         self.region.carried.push((self.region.fed, text));
                         return;
@@ -781,7 +802,27 @@ impl Engine {
             return;
         }
         let Some(next) = self.format.next(self.state, index) else {
+            // No row leads out on it: the marker is the state's text, as the model wrote it.
+            // Where that text is the table's own content, a `Malformed` event of no bytes stands
+            // before it, so a reader counts a frame the table did not read and no byte moves; in
+            // a thought the marker is the thought's text alone, as a table may read a thought's
+            // opener there (a turn anchor's table), and so it stays in a state a request's
+            // variant made content, where the table counted none (a thought's marker is the
+            // thought's text, a call's header the call's); where the template discards the
+            // state's text it is dropped as the text is. The run the stay holds (a lead, a
+            // trimmed tail) is the text's, as the marker's text would release it: released
+            // first, so the event stands right before the marker.
             let text = self.format.terminal_text(index).to_string();
+            if self.emits() == Emits::Content
+                && !self.format.is_framing(self.state)
+                && !self.format.is_remade(self.state)
+            {
+                self.release_stay(out);
+                out.push(Event::Malformed {
+                    text: self.tokens.text(""),
+                    why: MalformedReason::MarkerOutOfPlace,
+                });
+            }
             self.text(&text, out);
             return;
         };
@@ -883,9 +924,19 @@ impl Engine {
     /// closed reports leftover bytes as a block without a complete call; `UnterminatedRegion` is
     /// kept for a region the end of the stream cut.
     fn close_call(&mut self, closed: Closed, terminal: &str, out: &mut Events) -> bool {
-        let Some(call) = self.call.take() else {
+        let Some(mut call) = self.call.take() else {
             return false;
         };
+        // The whitespace after the region's last call is the template's: it leaves as wrapping,
+        // counted once where every call event is, and among ignored terminals it keeps its place.
+        let trailing = call.trailing_whitespace();
+        if !trailing.is_empty() {
+            let dropped = Event::Dropped {
+                text: Text::uncounted(trailing),
+                why: DropReason::Wrapper,
+            };
+            self.push_carried_out(dropped, out);
+        }
         let mut finished = Events::new();
         let taken = match closed {
             Closed::ByMarker => call.close(terminal, &mut finished),
@@ -897,21 +948,15 @@ impl Engine {
         if taken {
             self.region.fed += terminal.len();
         }
+        let mut finished = finished.drain();
         if closed == Closed::ByMarker {
-            let mut renamed = Events::new();
-            for event in finished.drain() {
-                renamed.push(match event {
-                    Event::Malformed {
-                        text,
-                        why: MalformedReason::UnterminatedRegion,
-                    } => Event::Malformed {
-                        text,
-                        why: MalformedReason::BlockWithoutACompleteCall,
-                    },
-                    event => event,
-                });
+            for event in &mut finished {
+                if let Event::Malformed { why, .. } = event {
+                    if *why == MalformedReason::UnterminatedRegion {
+                        *why = MalformedReason::BlockWithoutACompleteCall;
+                    }
+                }
             }
-            finished = renamed;
         }
         self.push_call_events(finished, out);
         // An ignored terminal no event carried out leaves here, before the region's close.
@@ -929,42 +974,46 @@ impl Engine {
     /// index the next call takes, and `Finish::tool_calls`. A syntax that writes several calls in
     /// one region starts each of them here. An event's bytes are counted as carried out of the
     /// region, with the ignored terminals that arrived among them placed where they arrived.
-    fn push_call_events(&mut self, mut events: Events, out: &mut Events) {
-        for event in events.drain() {
+    fn push_call_events(&mut self, events: Vec<Event>, out: &mut Events) {
+        for event in events {
             if let Event::ToolCallStart { id, .. } = &event {
                 self.calls += 1;
                 self.given_ids.push(id.clone());
             }
-            for event in self.carried_into(event) {
-                out.push(self.tokens.relabel(event));
-            }
+            self.push_carried_out(event, out);
         }
     }
 
-    /// `event` with the ignored terminals that arrived among the bytes it carries placed where
-    /// they arrived, and its bytes counted as carried out of the region. A call's event has them
-    /// spliced into its source, which no client reads; a text event is split around them, each
-    /// terminal a `Dropped { Wrapper }` event of its own, so that none joins text a client reads
-    /// (a syntax that hands held bytes back as content, as the bare list does).
-    fn carried_into(&mut self, mut event: Event) -> Vec<Event> {
+    /// Pushes `event` with its tokens counted and the ignored terminals that arrived among the
+    /// bytes it carries placed where they arrived, and counts its bytes as carried out of the
+    /// region. A call's event has them spliced into its source, which no client reads; a text
+    /// event is split around them, each terminal a `Dropped { Wrapper }` event of its own, so that
+    /// none joins text a client reads (a syntax that hands held bytes back as content, as the bare
+    /// list does). Nearly every event has nothing among its bytes and goes out as it is, without
+    /// a list of its own.
+    fn push_carried_out(&mut self, mut event: Event, out: &mut Events) {
         let Some(text) = event_text(&mut event) else {
-            return vec![event];
+            out.push(self.tokens.relabel(event));
+            return;
         };
         if text.text.is_empty() {
-            return vec![event];
+            out.push(self.tokens.relabel(event));
+            return;
         }
         let from = self.region.out;
         let to = from + text.text.len();
         self.region.out = to;
         if self.region.carried.is_empty() {
-            return vec![event];
+            out.push(self.tokens.relabel(event));
+            return;
         }
         let (within, after): (Vec<_>, Vec<_>) = std::mem::take(&mut self.region.carried)
             .into_iter()
             .partition(|(at, _)| *at <= to);
         self.region.carried = after;
         if within.is_empty() {
-            return vec![event];
+            out.push(self.tokens.relabel(event));
+            return;
         }
         let bytes = std::mem::take(&mut text.text);
         let mut cuts = Vec::with_capacity(within.len());
@@ -995,24 +1044,25 @@ impl Engine {
             if let Some(text) = event_text(&mut event) {
                 text.text = spliced;
             }
-            return vec![event];
+            out.push(self.tokens.relabel(event));
+            return;
         }
-        let mut events = Vec::with_capacity(cuts.len() * 2 + 1);
         let mut done = 0;
         for (cut, marker) in cuts {
             if cut > done {
-                events.push(text_event_like(&event, &bytes[done..cut]));
+                let piece = text_event_like(&event, &bytes[done..cut]);
+                out.push(self.tokens.relabel(piece));
             }
-            events.push(Event::Dropped {
-                text: Text::uncounted(marker),
+            out.push(Event::Dropped {
+                text: self.tokens.text(&marker),
                 why: DropReason::Wrapper,
             });
             done = cut;
         }
         if done < bytes.len() {
-            events.push(text_event_like(&event, &bytes[done..]));
+            let piece = text_event_like(&event, &bytes[done..]);
+            out.push(self.tokens.relabel(piece));
         }
-        events
     }
 
     /// Where the prompt leaves the engine: the table's replay of it ([`Format::replayed`], which
@@ -1658,6 +1708,92 @@ mod tests {
     }
 
     #[test]
+    fn a_terminal_with_no_row_is_the_states_text_and_content_says_so() {
+        // In the answer, a marker the table has no row for stays as the model wrote it, and a
+        // `Malformed` event of no bytes before it says a frame was not read; in the thought it is
+        // the thought's text alone, as the opener read there is; where the template discards the
+        // text it is dropped as the text is.
+        let events = run_after(
+            ernie(),
+            "Assistant:",
+            "<think>Plan <think>more</think>\n<response>\nHi<response>\nthere</response></response>",
+        );
+        let [content, reasoning, dropped, malformed] = kinds(&events);
+        assert_eq!(content, "Hi<response>\nthere");
+        assert_eq!(reasoning, "<think>Plan <think>more");
+        assert_eq!(dropped, "</think>\n<response>\n</response></response>");
+        assert_eq!(malformed, "");
+        let said: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(at, event)| match event {
+                Event::Malformed { text, why } => {
+                    assert_eq!(*why, MalformedReason::MarkerOutOfPlace, "{event:?}");
+                    assert!(text.text.is_empty(), "{event:?}");
+                    Some(at)
+                }
+                _ => None,
+            })
+            .collect();
+        let [at] = said[..] else {
+            panic!("one event of no bytes, not {said:?}: {events:?}");
+        };
+        assert!(
+            matches!(&events[at + 1], Event::Content(text) if text.text.starts_with("<response>\n")),
+            "{events:?}"
+        );
+        // A request that does not separate reasoning reads the thought as content, and counts
+        // the same: the marker written again inside the answer, not the ones in the thought.
+        let variant = run_after(
+            ernie().without_reasoning(),
+            "Assistant:",
+            "<think>Plan <think>more</think>\n<response>\nHi<response>\nthere</response></response>",
+        );
+        assert_eq!(
+            variant
+                .iter()
+                .filter(|event| matches!(event, Event::Malformed { .. }))
+                .count(),
+            1,
+            "{variant:?}"
+        );
+        let variant = run_after(
+            ernie().without_reasoning(),
+            "Assistant:",
+            "<think>\nPlan.\n</think>\n<response>\nHi\n</response>",
+        );
+        assert!(
+            !variant
+                .iter()
+                .any(|event| matches!(event, Event::Malformed { .. })),
+            "{variant:?}"
+        );
+    }
+
+    #[test]
+    fn the_run_a_trimmed_stay_holds_comes_out_before_the_event_for_a_marker_with_no_row() {
+        // The thought's close with no thought open, in a trimmed content stay: the tail the stay
+        // held is the text's, as the marker's text would make it, released before the event of
+        // no bytes, so the event stands right before the marker.
+        let events = run_after(gemma_trimmed(), "<|turn>model\n", "Hi \n<channel|>there");
+        let [content, reasoning, dropped, malformed] = kinds(&events);
+        assert_eq!(content, "Hi \n<channel|>there");
+        assert_eq!([reasoning, dropped, malformed], ["", "", ""]);
+        let at = events
+            .iter()
+            .position(|event| matches!(event, Event::Malformed { .. }))
+            .expect("the event of no bytes");
+        assert!(
+            matches!(&events[at - 1], Event::Content(text) if text.text.ends_with(" \n")),
+            "{events:?}"
+        );
+        assert!(
+            matches!(&events[at + 1], Event::Content(text) if text.text.starts_with("<channel|>")),
+            "{events:?}"
+        );
+    }
+
+    #[test]
     fn the_prompt_decides_the_start_when_it_writes_the_turns_first_byte() {
         // The generation prompt ends with a space after the anchor: the thought starts there, so
         // the answer's marker in the output is the thought's text.
@@ -2228,6 +2364,112 @@ mod tests {
             )),
             "{events:?}"
         );
+    }
+
+    #[test]
+    fn the_whitespace_after_a_regions_last_call_keeps_its_place_among_ignored_terminals_and_counts_once(
+    ) {
+        // The tagged assembler hands the whitespace after its last call back to the engine, which
+        // drops it as the region's wrapping: an ignored terminal that arrived inside that
+        // whitespace leaves between its bytes, in an event of its own, and every token is counted
+        // once, whole and at every cut.
+        let output = "<tool_call>\n<function=f>\n</function>\n|\n</tool_call>after";
+        let format =
+            || qwen3(CallSyntax::Tagged(Spelling::Json, Placement::OwnLine)).ignores("sep", "|");
+        let char_spans = |text: &str| -> Vec<TokenSpan> {
+            text.char_indices()
+                .map(|(at, c)| TokenSpan {
+                    token_id: 0,
+                    start: at,
+                    end: at + c.len_utf8(),
+                    continued: false,
+                })
+                .collect()
+        };
+        let read = |pieces: &[&str]| -> Vec<Event> {
+            let mut engine = Engine::new(format(), declared());
+            let mut out = Events::new();
+            for piece in pieces {
+                let spans = char_spans(piece);
+                engine
+                    .feed(
+                        Input::Delta {
+                            token_ids: &[],
+                            text: piece,
+                            spans: &spans,
+                        },
+                        &mut out,
+                    )
+                    .expect("delta");
+            }
+            engine
+                .feed(
+                    Input::End {
+                        finish: EngineFinish::Stop,
+                    },
+                    &mut out,
+                )
+                .expect("end");
+            out.drain()
+        };
+        let after_the_call = |events: &[Event]| -> (Vec<(String, Option<u32>)>, String) {
+            let end = events
+                .iter()
+                .position(|event| matches!(event, Event::ToolCallEnd { .. }))
+                .expect("the call's end");
+            let mut dropped = Vec::new();
+            let mut content = String::new();
+            for event in &events[end + 1..] {
+                match event {
+                    Event::Dropped { text, .. } => dropped.push((text.text.clone(), text.tokens)),
+                    Event::Content(text) => content.push_str(&text.text),
+                    Event::Finish { .. } => {}
+                    other => panic!("after the call: {other:?}"),
+                }
+            }
+            (dropped, content)
+        };
+        let counted = |events: &[Event]| -> u32 {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Content(text) | Event::Reasoning(text) => text.tokens,
+                    Event::Dropped { text, .. } | Event::Malformed { text, .. } => text.tokens,
+                    Event::ToolCallStart { source, .. }
+                    | Event::ToolCallArguments { source, .. }
+                    | Event::ToolCallEnd { source, .. } => source.tokens,
+                    Event::ReasoningStart | Event::ReasoningEnd | Event::Finish { .. } => None,
+                })
+                .sum()
+        };
+        let whole = read(&[output]);
+        assert_eq!(bytes(&whole), output);
+        assert_eq!(
+            after_the_call(&whole),
+            (
+                vec![
+                    ("\n".to_string(), Some(1)),
+                    ("|".to_string(), Some(1)),
+                    ("\n".to_string(), Some(1)),
+                    ("</tool_call>".to_string(), Some(12)),
+                ],
+                "after".to_string()
+            )
+        );
+        assert_eq!(counted(&whole), output.chars().count() as u32, "{whole:?}");
+        for cut in 1..output.len() {
+            let events = read(&[&output[..cut], &output[cut..]]);
+            assert_eq!(bytes(&events), output, "cut at {cut}");
+            let (dropped, content) = after_the_call(&events);
+            let texts: Vec<&str> = dropped.iter().map(|(text, _)| text.as_str()).collect();
+            assert_eq!(texts, ["\n", "|", "\n", "</tool_call>"], "cut at {cut}");
+            assert_eq!(content, "after", "cut at {cut}");
+            assert_eq!(
+                counted(&events),
+                output.chars().count() as u32,
+                "cut at {cut}: {events:?}"
+            );
+        }
     }
 
     #[test]

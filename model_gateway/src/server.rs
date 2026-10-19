@@ -16,6 +16,7 @@ use axum::{
     Json, Router,
 };
 use llm_tokenizer::TokenizerRegistry;
+use metrics_exporter_prometheus::PrometheusHandle;
 use openai_protocol::{
     chat::ChatCompletionRequest,
     classify::ClassifyRequest,
@@ -42,7 +43,10 @@ use openai_protocol::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-use smg_mesh::{MeshServerBuilder, MeshServerConfig, MeshServerHandler};
+use smg_mesh::{
+    ClusterState, MeshServer, MeshServerBuilder, MeshServerConfig, MeshServerHandler,
+    PreparedMeshServer,
+};
 use tokio::{signal, spawn};
 use tracing::{debug, error, info, warn, Level};
 use wfaas::LoggingSubscriber;
@@ -1485,6 +1489,289 @@ fn supervise_discovery(
     abort
 }
 
+/// The observability the gateway serves beside its routes, started once the
+/// router and the app context are built (the storage hooks, policy files and
+/// store connections are behind us; the mesh TLS material, the apps and the
+/// listener addresses can still fail the start after this, with these
+/// listeners bound) and before the admin and HTTP listeners: the O(1)
+/// readiness state the probes read (maintained from
+/// WorkerRegistry events plus a short checkpoint for broadcast-bypassing
+/// mutations, served by `/readiness` on the main listener and on the optional
+/// probe listener); the metrics listener (the recorder exists since the top of
+/// start-up, the port binds only now, eagerly, so a conflict or a bad address
+/// fails the start before the HTTP listener) with the Tokio runtime observer
+/// on it (event-loop canary and sampler; `startup` runs on the main runtime,
+/// so the observer lands on, and measures, the runtime that serves requests);
+/// the sweeper of unstored background responses whose polling window ended
+/// with no gateway there to retire them (swept now whatever this gateway's
+/// background setting, an earlier one may have had it on, then once per window
+/// while background mode is on); and the optional isolated probe listener
+/// (`--health-check-port`: /liveness, /readiness, /health on a dedicated
+/// single-worker runtime on its own OS thread, so probes cannot be starved by
+/// the request runtime; the same routes stay on the main listener). The
+/// maintainer's and the sweeper's join handles detach on drop; the tasks run
+/// on. Returns the probe state the app and the probe listener share.
+async fn start_observability(
+    config: &ServerConfig,
+    app_context: &Arc<AppContext>,
+    metrics_handle: Option<PrometheusHandle>,
+) -> Result<Arc<crate::health::ProbeState>, Box<dyn std::error::Error>> {
+    let probe_state = crate::health::ProbeState::new(app_context.inflight_tracker.clone());
+    let _readiness_maintainer = crate::health::spawn_readiness_maintainer(
+        probe_state.clone(),
+        app_context.worker_registry.clone(),
+        app_context.tokenizer_registry.clone(),
+        config.router_config.clone(),
+    );
+
+    if let (Some(handle), Some(prometheus_config)) = (metrics_handle, &config.prometheus_config) {
+        let (_metrics_addr, _server_handle) = metrics_server::start_metrics_server(
+            handle,
+            prometheus_config.host.clone(),
+            prometheus_config.port,
+        )
+        .await?;
+        runtime_metrics::spawn_observer();
+    }
+
+    let _unstored_sweeper = spawn_unstored_sweeper(
+        app_context.response_storage.clone(),
+        config.router_config.max_background_responses > 0,
+    );
+
+    if let Some(probe_port) = config.health_check_port {
+        let probe_addr =
+            crate::health::start_probe_listener(&config.host, probe_port, probe_state.clone())?;
+        info!("Probe listener started on {probe_addr} (--health-check-port {probe_port})");
+    }
+    Ok(probe_state)
+}
+
+/// Worker discovery and mesh-router discovery, two independent lifetimes:
+/// either may run without the other, each is supervised for an unexpected exit
+/// (see [`supervise_discovery`]) and its abort handle sits in the returned
+/// [`DiscoveryTasks`] so shutdown cancels it. A discovery that fails to start
+/// is logged and the gateway goes on without it. The mesh-router discovery
+/// needs the mesh's cluster state and advertised port; configured without a
+/// mesh, it is skipped with a warning.
+async fn start_discovery(
+    service_discovery_config: Option<RuntimeDiscoveryConfig>,
+    mesh_discovery_config: Option<MeshDiscoveryConfig>,
+    app_context: &Arc<AppContext>,
+    mesh_cluster_state: Option<ClusterState>,
+    mesh_port: Option<u16>,
+) -> DiscoveryTasks {
+    let mut discovery_tasks = DiscoveryTasks::default();
+
+    if let Some(service_discovery_config) = service_discovery_config {
+        let app_context_arc = Arc::clone(app_context);
+        match start_service_discovery(service_discovery_config, app_context_arc).await {
+            Ok(handle) => {
+                info!("Service discovery started");
+                discovery_tasks
+                    .0
+                    .push(supervise_discovery("Worker discovery", handle));
+            }
+            Err(e) => {
+                error!("Failed to start service discovery: {e}");
+                warn!("Continuing without service discovery");
+            }
+        }
+    }
+
+    if let Some(mesh_discovery_config) = mesh_discovery_config {
+        match (
+            mesh_discovery_config.is_enabled(),
+            mesh_cluster_state,
+            mesh_port,
+        ) {
+            (true, Some(cluster_state), Some(port)) => {
+                match start_mesh_discovery(mesh_discovery_config, cluster_state, port).await {
+                    Ok(handle) => {
+                        info!("Mesh router discovery started");
+                        discovery_tasks
+                            .0
+                            .push(supervise_discovery("Mesh router discovery", handle));
+                    }
+                    Err(e) => {
+                        error!("Failed to start mesh router discovery: {e}");
+                        warn!("Continuing without mesh router discovery");
+                    }
+                }
+            }
+            (true, _, _) => warn!(
+                "Router selector configured but mesh is not enabled (mesh cluster state or \
+                 mesh port not provided). Skipping router discovery."
+            ),
+            (false, _, _) => {}
+        }
+    }
+    discovery_tasks
+}
+
+/// The job queue and the typed workflow engines, then the start-up jobs on
+/// them, in this order: the tokenizer (when a tokenizer or model path is
+/// configured and autoload is on; before the workers, so the tokenizer is
+/// there when they arrive), the workers from the configuration, and the MCP
+/// servers when an MCP configuration is given (the orchestrator then refreshes
+/// its inventory on its own channel, by `inventory.refresh_interval`). Each
+/// job completes in the background; a job the queue refuses fails the start.
+async fn start_workflow_engines(
+    app_context: &Arc<AppContext>,
+    config: &ServerConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let weak_context = Arc::downgrade(app_context);
+    let worker_job_queue = JobQueue::new(
+        JobQueueConfig {
+            queue_capacity: config.router_config.job_queue_capacity,
+            max_concurrent_jobs: config.router_config.job_queue_concurrency,
+        },
+        weak_context,
+    );
+    #[expect(
+        clippy::expect_used,
+        reason = "OnceLock initialization during startup; double-init is a fatal bug"
+    )]
+    app_context
+        .worker_job_queue
+        .set(worker_job_queue)
+        .expect("JobQueue should only be initialized once");
+
+    // Initialize typed workflow engines
+    let engines = WorkflowEngines::new(&config.router_config);
+
+    // Subscribe logging to all workflow engines
+    engines.subscribe_all(Arc::new(LoggingSubscriber)).await;
+
+    #[expect(
+        clippy::expect_used,
+        reason = "OnceLock initialization during startup; double-init is a fatal bug"
+    )]
+    app_context
+        .workflow_engines
+        .set(engines)
+        .expect("WorkflowEngines should only be initialized once");
+    debug!(
+        "Workflow engines initialized (health check timeout: {}s)",
+        config.router_config.health_check.timeout_secs
+    );
+
+    // Submit startup tokenizer job if tokenizer path is configured
+    // This runs before worker initialization to ensure tokenizer is available
+    if config.router_config.disable_tokenizer_autoload {
+        info!("Tokenizer autoload disabled via config; skipping startup tokenizer load");
+    } else if let Some(tokenizer_source) = config
+        .router_config
+        .tokenizer_path
+        .as_ref()
+        .or(config.router_config.model_path.as_ref())
+    {
+        info!("Loading startup tokenizer from: {}", tokenizer_source);
+
+        #[expect(
+            clippy::expect_used,
+            reason = "JobQueue was just initialized above; absence is unreachable"
+        )]
+        let job_queue = app_context
+            .worker_job_queue
+            .get()
+            .expect("JobQueue should be initialized");
+
+        let tokenizer_config = TokenizerConfigRequest {
+            id: TokenizerRegistry::generate_id(),
+            name: tokenizer_source.clone(),
+            source: tokenizer_source.clone(),
+            chat_template_path: config.router_config.chat_template.clone(),
+            cache_config: config.router_config.tokenizer_cache.to_option(),
+            fail_on_duplicate: false,
+        };
+
+        let job = Job::AddTokenizer {
+            config: Box::new(tokenizer_config),
+        };
+
+        job_queue
+            .submit(job)
+            .await
+            .map_err(|e| format!("Failed to submit startup tokenizer job: {e}"))?;
+
+        info!("Startup tokenizer job submitted (will complete in background)");
+    }
+
+    info!(
+        "Initializing workers for routing mode: {:?}",
+        config.router_config.mode
+    );
+
+    // Submit worker initialization job to queue
+    #[expect(
+        clippy::expect_used,
+        reason = "JobQueue was initialized above; absence is unreachable"
+    )]
+    let job_queue = app_context
+        .worker_job_queue
+        .get()
+        .expect("JobQueue should be initialized");
+    let job = Job::InitializeWorkersFromConfig {
+        router_config: Box::new(config.router_config.clone()),
+    };
+    job_queue
+        .submit(job)
+        .await
+        .map_err(|e| format!("Failed to submit worker initialization job: {e}"))?;
+
+    info!("Worker initialization job submitted (will complete in background)");
+
+    if let Some(mcp_config) = &config.router_config.mcp_config {
+        info!("Found {} MCP server(s) in config", mcp_config.servers.len());
+        let mcp_job = Job::InitializeMcpServers {
+            mcp_config: Box::new(mcp_config.clone()),
+        };
+        job_queue
+            .submit(mcp_job)
+            .await
+            .map_err(|e| format!("Failed to submit MCP initialization job: {e}"))?;
+    } else {
+        info!("No MCP config provided, skipping MCP server initialization");
+    }
+    Ok(())
+}
+
+/// The mesh server bound and prepared, before the admin and HTTP listeners
+/// bind; `None` without a mesh: the listener against the configured address,
+/// the TLS configuration from the mesh TLS material (the mesh TLS flags check
+/// only that their files exist), the gossip service and its controller. It
+/// runs before the other listeners bind because a failure here, a held port
+/// or bad material, used to be one error line from the mesh server's task a
+/// second after the gateway was already serving (`Mesh server failed: ...`
+/// once, `/readiness` ready), as a node outside the mesh with its rate limits
+/// and worker state shared with nobody; now it fails the start. The prepared
+/// server serves once every listener is bound.
+async fn prepare_mesh_server(
+    mesh_server: Option<MeshServer>,
+    mesh_server_config: Option<&MeshServerConfig>,
+) -> Result<Option<PreparedMeshServer>, Box<dyn std::error::Error>> {
+    let Some((mesh_server, mesh_server_config)) = mesh_server.zip(mesh_server_config) else {
+        return Ok(None);
+    };
+    let mesh_addr = mesh_server_config.bind_addr;
+    let mesh_listener = tokio::net::TcpListener::bind(mesh_addr)
+        .await
+        .map_err(|e| {
+            format!("Failed to bind the mesh listener on {mesh_addr} (--mesh-port): {e}")
+        })?;
+    let flags = if mesh_server_config.mtls_config.is_some() {
+        "--enable-mesh with --mesh-tls-ca-cert, --mesh-tls-cert and --mesh-tls-key"
+    } else {
+        "--enable-mesh"
+    };
+    let prepared = mesh_server
+        .prepare_with_listener(mesh_listener)
+        .await
+        .map_err(|e| format!("Failed to start the mesh server ({flags}): {e:#}"))?;
+    Ok(Some(prepared))
+}
+
 /// [`startup`] on `runtime` to its end, then the process-wide observability
 /// closed behind it, on every exit alike: the log writers are flushed and
 /// stopped, then the tracer is flushed and shut down (a bounded wait, see
@@ -1637,7 +1924,8 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     // Seed the process-wide multimodal tensor transport defaults from the
     // resolved router config; per-worker specs still override at request time.
     use crate::routers::grpc::multimodal::{
-        init_mm_settings, init_mm_transport_defaults, MultimodalSettings,
+        enforce_jpeg_decoder_policy, init_mm_settings, init_mm_transport_defaults,
+        report_jpeg_decoder, MultimodalSettings,
     };
     init_mm_transport_defaults(
         config.router_config.multimodal_tensor_transport,
@@ -1648,6 +1936,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     let mm_settings = MultimodalSettings::resolve(&config.router_config)
         .map_err(|error| format!("multimodal settings: {error:#}"))?;
     llm_multimodal::init_log_video_decode_timing(mm_settings.log_mm_timing.value);
+    let turbojpeg = mm_settings.turbojpeg.value;
     init_mm_settings(mm_settings);
 
     // The metrics recorder is installed now so start-up records land in it;
@@ -1660,6 +1949,20 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         metrics::init_startup_series();
         handle
     });
+
+    // The JPEG decoder report and the TurboJPEG policy come after the
+    // recorder: the report sets its gauges (`smg_mm_turbojpeg_available`,
+    // `smg_mm_webp_available`) on every call, on the recorder in force (the
+    // log lines alone are said once per process); the gauges must land in the
+    // recorder /metrics serves, not the no-op one before it. The policy is
+    // still enforced once, in every routing mode and before anything binds:
+    // under `require` a host without the library stops the process here,
+    // where a refusal at router creation would be turned into a warning by
+    // the gateway's try-register (--enable-igw) and the process would start
+    // with no gRPC router behind its routes.
+    report_jpeg_decoder();
+    enforce_jpeg_decoder_policy(turbojpeg)
+        .map_err(|error| format!("TurboJPEG policy: {error:#}"))?;
 
     // Build the mesh server if configured. Starting gossip is deferred until
     // MeshAdapters has registered the `worker:`/`rl:` CRDT namespaces below —
@@ -1713,120 +2016,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         app_context.inflight_tracker.start_sampler(20);
     }
 
-    let weak_context = Arc::downgrade(&app_context);
-    let worker_job_queue = JobQueue::new(
-        JobQueueConfig {
-            queue_capacity: config.router_config.job_queue_capacity,
-            max_concurrent_jobs: config.router_config.job_queue_concurrency,
-        },
-        weak_context,
-    );
-    #[expect(
-        clippy::expect_used,
-        reason = "OnceLock initialization during startup; double-init is a fatal bug"
-    )]
-    app_context
-        .worker_job_queue
-        .set(worker_job_queue)
-        .expect("JobQueue should only be initialized once");
-
-    // Initialize typed workflow engines
-    let engines = WorkflowEngines::new(&config.router_config);
-
-    // Subscribe logging to all workflow engines
-    engines.subscribe_all(Arc::new(LoggingSubscriber)).await;
-
-    #[expect(
-        clippy::expect_used,
-        reason = "OnceLock initialization during startup; double-init is a fatal bug"
-    )]
-    app_context
-        .workflow_engines
-        .set(engines)
-        .expect("WorkflowEngines should only be initialized once");
-    debug!(
-        "Workflow engines initialized (health check timeout: {}s)",
-        config.router_config.health_check.timeout_secs
-    );
-
-    // Submit startup tokenizer job if tokenizer path is configured
-    // This runs before worker initialization to ensure tokenizer is available
-    if config.router_config.disable_tokenizer_autoload {
-        info!("Tokenizer autoload disabled via config; skipping startup tokenizer load");
-    } else if let Some(tokenizer_source) = config
-        .router_config
-        .tokenizer_path
-        .as_ref()
-        .or(config.router_config.model_path.as_ref())
-    {
-        info!("Loading startup tokenizer from: {}", tokenizer_source);
-
-        #[expect(
-            clippy::expect_used,
-            reason = "JobQueue was just initialized above; absence is unreachable"
-        )]
-        let job_queue = app_context
-            .worker_job_queue
-            .get()
-            .expect("JobQueue should be initialized");
-
-        let tokenizer_config = TokenizerConfigRequest {
-            id: TokenizerRegistry::generate_id(),
-            name: tokenizer_source.clone(),
-            source: tokenizer_source.clone(),
-            chat_template_path: config.router_config.chat_template.clone(),
-            cache_config: config.router_config.tokenizer_cache.to_option(),
-            fail_on_duplicate: false,
-        };
-
-        let job = Job::AddTokenizer {
-            config: Box::new(tokenizer_config),
-        };
-
-        job_queue
-            .submit(job)
-            .await
-            .map_err(|e| format!("Failed to submit startup tokenizer job: {e}"))?;
-
-        info!("Startup tokenizer job submitted (will complete in background)");
-    }
-
-    info!(
-        "Initializing workers for routing mode: {:?}",
-        config.router_config.mode
-    );
-
-    // Submit worker initialization job to queue
-    #[expect(
-        clippy::expect_used,
-        reason = "JobQueue was initialized above; absence is unreachable"
-    )]
-    let job_queue = app_context
-        .worker_job_queue
-        .get()
-        .expect("JobQueue should be initialized");
-    let job = Job::InitializeWorkersFromConfig {
-        router_config: Box::new(config.router_config.clone()),
-    };
-    job_queue
-        .submit(job)
-        .await
-        .map_err(|e| format!("Failed to submit worker initialization job: {e}"))?;
-
-    info!("Worker initialization job submitted (will complete in background)");
-
-    if let Some(mcp_config) = &config.router_config.mcp_config {
-        info!("Found {} MCP server(s) in config", mcp_config.servers.len());
-        let mcp_job = Job::InitializeMcpServers {
-            mcp_config: Box::new(mcp_config.clone()),
-        };
-        job_queue
-            .submit(mcp_job)
-            .await
-            .map_err(|e| format!("Failed to submit MCP initialization job: {e}"))?;
-    } else {
-        info!("No MCP config provided, skipping MCP server initialization");
-    }
+    // The job queue, the typed workflow engines and the start-up jobs on
+    // them: the tokenizer, the workers from the configuration, the MCP
+    // servers; the jobs complete in the background.
+    start_workflow_engines(&app_context, &config).await?;
 
     // Note: MCP orchestrator handles background refresh internally via refresh channel
     // configured by inventory.refresh_interval in mcp.yaml
@@ -1898,55 +2091,13 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         .as_ref()
         .map(|c| c.advertise_addr.port());
 
-    // O(1) readiness state: maintained from WorkerRegistry events (plus a
-    // short checkpoint for broadcast-bypassing mutations), read by
-    // `/readiness` on the main listener and on the optional dedicated
-    // probe listener below. Dropping the JoinHandle detaches the task.
-    let probe_state = crate::health::ProbeState::new(app_context.inflight_tracker.clone());
-    let _readiness_maintainer = crate::health::spawn_readiness_maintainer(
-        probe_state.clone(),
-        app_context.worker_registry.clone(),
-        app_context.tokenizer_registry.clone(),
-        config.router_config.clone(),
-    );
-
-    // The metrics listener: the recorder exists since the top of start-up,
-    // the port binds only now (see there). It still binds eagerly, so a port
-    // conflict or a bad address fails the start before the HTTP listener.
-    if let (Some(handle), Some(prometheus_config)) = (metrics_handle, &config.prometheus_config) {
-        let (_metrics_addr, _server_handle) = metrics_server::start_metrics_server(
-            handle,
-            prometheus_config.host.clone(),
-            prometheus_config.port,
-        )
-        .await?;
-        // Tokio runtime self-observability (event-loop canary + sampler).
-        // `startup` runs on the main runtime, so the observer lands on —
-        // and therefore measures — the runtime that serves requests.
-        runtime_metrics::spawn_observer();
-    }
-
-    // The records of unstored background responses whose polling window
-    // ended with no gateway there to retire them (a stop or a crash inside
-    // the window, with a store that outlives the process) are swept now,
-    // whatever this gateway's background setting (an earlier one may have had
-    // it on), and then once per window while background mode is on, where new
-    // unstored records can appear. Dropping the JoinHandle detaches the task.
-    let _unstored_sweeper = spawn_unstored_sweeper(
-        app_context.response_storage.clone(),
-        config.router_config.max_background_responses > 0,
-    );
-
-    // Optional isolated probe listener (additive): when `--health-check-port`
-    // is set, serves /liveness, /readiness, /health on that port from a
-    // dedicated single-worker runtime on its own OS thread, so probes
-    // cannot be starved by the request runtime. The same routes always remain
-    // on the main listener.
-    if let Some(probe_port) = config.health_check_port {
-        let probe_addr =
-            crate::health::start_probe_listener(&config.host, probe_port, probe_state.clone())?;
-        info!("Probe listener started on {probe_addr} (--health-check-port {probe_port})");
-    }
+    // The readiness state, the metrics listener, the sweeper and the probe
+    // listener: the router and the app context are built (the storage hooks,
+    // policy files and store connections are behind us), so the listeners
+    // among them bind now, before the admin and HTTP listeners; the mesh TLS
+    // material, the apps and the listener addresses can still fail the start
+    // after this point, with these two bound.
+    let probe_state = start_observability(&config, &app_context, metrics_handle).await?;
 
     let app_state = Arc::new(AppState {
         router,
@@ -1957,54 +2108,20 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         mesh_adapters,
         probe_state,
     });
+    // For the shutdown task below: the mesh is told of the stop before the
+    // listeners drain (`app_state` moves into the route groups first).
+    let mesh_handler = app_state.mesh_handler.clone();
     // Worker discovery and mesh-router discovery are independent lifetimes:
     // either may run without the other. Each is supervised for unexpected exit
     // and its abort handle held so shutdown cancels it.
-    let mut discovery_tasks = DiscoveryTasks::default();
-
-    if let Some(service_discovery_config) = config.service_discovery_config {
-        let app_context_arc = Arc::clone(&app_state.context);
-        match start_service_discovery(service_discovery_config, app_context_arc).await {
-            Ok(handle) => {
-                info!("Service discovery started");
-                discovery_tasks
-                    .0
-                    .push(supervise_discovery("Worker discovery", handle));
-            }
-            Err(e) => {
-                error!("Failed to start service discovery: {e}");
-                warn!("Continuing without service discovery");
-            }
-        }
-    }
-
-    if let Some(mesh_discovery_config) = config.mesh_discovery_config {
-        match (
-            mesh_discovery_config.is_enabled(),
-            mesh_cluster_state,
-            mesh_port,
-        ) {
-            (true, Some(cluster_state), Some(port)) => {
-                match start_mesh_discovery(mesh_discovery_config, cluster_state, port).await {
-                    Ok(handle) => {
-                        info!("Mesh router discovery started");
-                        discovery_tasks
-                            .0
-                            .push(supervise_discovery("Mesh router discovery", handle));
-                    }
-                    Err(e) => {
-                        error!("Failed to start mesh router discovery: {e}");
-                        warn!("Continuing without mesh router discovery");
-                    }
-                }
-            }
-            (true, _, _) => warn!(
-                "Router selector configured but mesh is not enabled (mesh cluster state or \
-                 mesh port not provided). Skipping router discovery."
-            ),
-            (false, _, _) => {}
-        }
-    }
+    let discovery_tasks = start_discovery(
+        config.service_discovery_config,
+        config.mesh_discovery_config,
+        &app_state.context,
+        mesh_cluster_state,
+        mesh_port,
+    )
+    .await;
 
     info!(
         "Router ready | workers: {:?}",
@@ -2084,53 +2201,9 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     // One bind-host rule for every listener: IPv6 with or without brackets.
     let addr = crate::config::bind_socket_addr(&config.host, config.port)
         .map_err(|e| format!("Invalid address: {e}"))?;
-    // The mesh listener binds now too, eagerly, before the HTTP listener: a
-    // mesh port another process holds used to surface as one error line from
-    // the mesh server's task after the gateway was already serving, as a node
-    // outside the mesh, its rate limits and worker state shared with nobody.
-    // The bound socket is handed to the mesh server below.
-    let mesh_listener = match &config.mesh_server_config {
-        Some(mesh_server_config) => {
-            let mesh_addr = mesh_server_config.bind_addr;
-            Some(
-                tokio::net::TcpListener::bind(mesh_addr)
-                    .await
-                    .map_err(|e| {
-                        format!(
-                            "Failed to bind the mesh listener on {mesh_addr} (--mesh-port): {e}"
-                        )
-                    })?,
-            )
-        }
-        None => None,
-    };
-    // Everything the mesh server does before it serves happens now, before
-    // the HTTP listener binds: the listener against the configured address,
-    // the TLS configuration from the mesh TLS material, the gossip service
-    // and its controller. A failure here used to be one error line from the
-    // mesh server's task a second after the gateway was serving, as a node
-    // outside the mesh (`Mesh server failed: ...` once, `/readiness` ready);
-    // the mesh TLS flags check only that their files exist.
-    let mesh_server = match (mesh_server, mesh_listener) {
-        (Some(mesh_server), Some(mesh_listener)) => {
-            let with_tls = config
-                .mesh_server_config
-                .as_ref()
-                .is_some_and(|mesh| mesh.mtls_config.is_some());
-            let flags = if with_tls {
-                "--enable-mesh with --mesh-tls-ca-cert, --mesh-tls-cert and --mesh-tls-key"
-            } else {
-                "--enable-mesh"
-            };
-            Some(
-                mesh_server
-                    .prepare_with_listener(mesh_listener)
-                    .await
-                    .map_err(|e| format!("Failed to start the mesh server ({flags}): {e:#}"))?,
-            )
-        }
-        _ => None,
-    };
+    // The mesh listener binds and the mesh server prepares now, eagerly,
+    // before the admin and HTTP listeners bind (see `prepare_mesh_server`).
+    let mesh_server = prepare_mesh_server(mesh_server, config.mesh_server_config.as_ref()).await?;
     // The admin listener binds now, before the HTTP listener, for the reason
     // the mesh listener did: a port another process holds fails the start
     // here, before anything serves.
@@ -2184,57 +2257,48 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     let admin_handle_clone = admin_handle.clone();
     let admin_stop = admin_handle.clone();
     let inflight_tracker = app_context.inflight_tracker.clone();
-    let grace = Duration::from_secs(config.shutdown_grace_period_secs);
-    // Keep accepting for a short settle window before gating, so requests still
-    // routed here during load-balancer / EndpointSlice propagation lag are
-    // served instead of connection-refused — readiness already reports 503 by
-    // then (#1694), so the orchestrator is removing this endpoint meanwhile.
-    // Carved out of the grace budget (never more than half, capped at 5s — the
-    // per-worker `drain_settle_secs` default) so total shutdown stays within
-    // `shutdown_grace_period_secs` and never overruns terminationGracePeriod.
-    let settle = (grace / 2).min(Duration::from_secs(5));
-    let drain_timeout = grace.saturating_sub(settle);
+    let budget = ShutdownBudget::from_grace_secs(config.shutdown_grace_period_secs);
+    let drain_timeout = budget.drain;
     #[expect(
         clippy::disallowed_methods,
         reason = "shutdown signal handler must outlive the server to trigger graceful shutdown"
     )]
     spawn(async move {
         shutdown_signal().await;
-
-        // Phase 1: Flip readiness to 503, hold the listener open through the
-        // settle window so propagation-lagged requests still land, then gate
-        // new connections.
-        info!(
-            in_flight = inflight_tracker.len(),
-            "Beginning graceful shutdown: readiness draining"
-        );
-        inflight_tracker.begin_drain();
-        if !settle.is_zero() {
-            info!(
-                settle_secs = settle.as_secs(),
-                "Keeping listener open during load-balancer propagation window"
-            );
-            tokio::time::sleep(settle).await;
-        }
-        handle_clone.graceful_shutdown(Some(drain_timeout));
-        admin_handle_clone.graceful_shutdown(Some(drain_timeout));
-
-        // Phase 2: Drain — wait for in-flight requests to complete
-        // Re-check after gating to catch requests that arrived between the
-        // snapshot and graceful_shutdown stopping the accept loop.
-        if !inflight_tracker.is_empty() {
-            let drained = inflight_tracker.wait_for_drain(drain_timeout).await;
-            if drained {
-                info!("All in-flight requests drained");
-            } else {
-                warn!(
-                    remaining = inflight_tracker.len(),
-                    timeout_secs = drain_timeout.as_secs(),
-                    "Drain timed out, forcing shutdown with requests still in-flight"
-                );
+        // The mesh hears of the stop first: `Leaving` goes to the live
+        // members during the settle window (the broadcast is bounded by 3 s,
+        // then a second for propagation, then the gossip loop stops), so
+        // they know as soon as this member stops serving, instead of finding
+        // out from failed probes once it is gone. The leave gets the window
+        // and no more (with no window, what the grace allows); cut short, its
+        // broadcast tasks run on and the gossip loop is stopped by
+        // `stop_mesh`.
+        let leave_mesh = async {
+            if let Some(mesh) = &mesh_handler {
+                if let Err(e) = mesh.graceful_shutdown().await {
+                    warn!("Leaving the mesh failed: {e:#}");
+                }
             }
-        }
-        // Phase 3: Teardown proceeds after axum server stops (in the main task)
+        };
+        // The leave's own stop of the gossip loop did not run: stop it as a
+        // finished leave would have, so both paths end the same way; the
+        // broadcast tasks the leave spawned run on.
+        let stop_mesh = || {
+            if let Some(mesh) = &mesh_handler {
+                mesh.shutdown();
+            }
+        };
+        graceful_shutdown(
+            &inflight_tracker,
+            budget,
+            leave_mesh,
+            stop_mesh,
+            |drain_timeout| {
+                handle_clone.graceful_shutdown(Some(drain_timeout));
+                admin_handle_clone.graceful_shutdown(Some(drain_timeout));
+            },
+        )
+        .await;
     });
 
     // Bounds on connections that carry no request (a head that never
@@ -2361,6 +2425,291 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     match (server_result, admin_result) {
         (Err(e), _) | (Ok(()), Err(e)) => Err(Box::new(e) as Box<dyn std::error::Error>),
         (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+/// The graceful shutdown's time: the grace the process has
+/// (`shutdown_grace_period_secs`), the settle window carved out of it, and
+/// the drain that is left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ShutdownBudget {
+    grace: Duration,
+    /// Accepting goes on for a short settle window before gating, so
+    /// requests still routed here during load-balancer / EndpointSlice
+    /// propagation lag are served instead of connection-refused; readiness
+    /// already reports 503 by then (#1694), so the orchestrator is removing
+    /// this endpoint meanwhile.
+    settle: Duration,
+    /// What the settle window leaves of the grace for the in-flight requests.
+    drain: Duration,
+}
+
+impl ShutdownBudget {
+    /// The settle window is carved out of the grace budget (never more than
+    /// half, capped at 5 s, the per-worker `drain_settle_secs` default) so
+    /// total shutdown stays within `shutdown_grace_period_secs` and never
+    /// overruns terminationGracePeriod.
+    fn from_grace_secs(grace_secs: u64) -> Self {
+        let grace = Duration::from_secs(grace_secs);
+        let settle = (grace / 2).min(Duration::from_secs(5));
+        Self {
+            grace,
+            settle,
+            drain: grace.saturating_sub(settle),
+        }
+    }
+}
+
+/// The graceful shutdown after the signal, in its phases. Phase 1: readiness
+/// flips to 503 and the listeners stay open through the settle window, during
+/// which `leave_mesh` runs (with no window, it gets what the grace allows;
+/// one that does not finish in time is cut short and `stop_mesh` is called),
+/// then `stop_listeners` gates new connections with what is left of the
+/// grace. Phase 2: the in-flight requests drain within that, or the drain
+/// gives up and says so. Phase 3, the teardown, is the caller's once the
+/// listeners have stopped.
+async fn graceful_shutdown(
+    inflight_tracker: &InFlightRequestTracker,
+    budget: ShutdownBudget,
+    leave_mesh: impl Future<Output = ()>,
+    stop_mesh: impl FnOnce(),
+    stop_listeners: impl FnOnce(Duration),
+) {
+    // Phase 1: Flip readiness to 503, hold the listener open through the
+    // settle window so propagation-lagged requests still land, then gate
+    // new connections.
+    info!(
+        in_flight = inflight_tracker.len(),
+        "Beginning graceful shutdown: readiness draining"
+    );
+    // Everything below shares the grace: the drain takes what the settle
+    // window and the leave of the mesh leave of it.
+    let deadline = tokio::time::Instant::now() + budget.grace;
+    inflight_tracker.begin_drain();
+    let left_in_time = if budget.settle.is_zero() {
+        tokio::time::timeout(budget.grace, leave_mesh).await.is_ok()
+    } else {
+        info!(
+            settle_secs = budget.settle.as_secs(),
+            "Keeping listener open during load-balancer propagation window"
+        );
+        let (left, ()) = tokio::join!(
+            tokio::time::timeout(budget.settle, leave_mesh),
+            tokio::time::sleep(budget.settle)
+        );
+        left.is_ok()
+    };
+    if !left_in_time {
+        stop_mesh();
+        if !budget.grace.is_zero() {
+            info!(
+                "Leaving the mesh was cut short by the settle window; its broadcast runs on \
+                 and the gossip loop is stopped now"
+            );
+        }
+    }
+    let drain_timeout = deadline.saturating_duration_since(tokio::time::Instant::now());
+    stop_listeners(drain_timeout);
+
+    // Phase 2: Drain — wait for in-flight requests to complete
+    // Re-check after gating to catch requests that arrived between the
+    // snapshot and graceful_shutdown stopping the accept loop.
+    if !inflight_tracker.is_empty() {
+        let drained = inflight_tracker.wait_for_drain(drain_timeout).await;
+        if drained {
+            info!("All in-flight requests drained");
+        } else {
+            warn!(
+                remaining = inflight_tracker.len(),
+                timeout_secs = drain_timeout.as_secs(),
+                "Drain timed out, forcing shutdown with requests still in-flight"
+            );
+        }
+    }
+    // Phase 3: Teardown proceeds after axum server stops (in the main task)
+}
+
+#[cfg(test)]
+mod graceful_shutdown_tests {
+    use std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Mutex,
+        },
+        time::Duration,
+    };
+
+    use super::{graceful_shutdown, InFlightRequestTracker, ShutdownBudget};
+
+    /// The settle window is half the grace, capped at 5 s; the drain is the
+    /// rest; a zero grace has neither.
+    #[test]
+    fn the_budget_splits_the_grace() {
+        let secs = |s| Duration::from_secs(s);
+        assert_eq!(
+            ShutdownBudget::from_grace_secs(30),
+            ShutdownBudget {
+                grace: secs(30),
+                settle: secs(5),
+                drain: secs(25)
+            }
+        );
+        assert_eq!(
+            ShutdownBudget::from_grace_secs(6),
+            ShutdownBudget {
+                grace: secs(6),
+                settle: secs(3),
+                drain: secs(3)
+            }
+        );
+        assert_eq!(
+            ShutdownBudget::from_grace_secs(0),
+            ShutdownBudget {
+                grace: secs(0),
+                settle: secs(0),
+                drain: secs(0)
+            }
+        );
+    }
+
+    /// The phases in order, on a paused clock: readiness drains at once;
+    /// the leave finishes inside the settle window and the listeners stay
+    /// open through the whole of it; they are then gated with what the
+    /// settle left of the grace; the drain ends when the last request does,
+    /// well before the deadline.
+    #[tokio::test(start_paused = true)]
+    async fn the_phases_run_in_order_within_the_grace() {
+        let tracker = InFlightRequestTracker::new();
+        let request = tracker.track();
+        let budget = ShutdownBudget::from_grace_secs(30);
+        let start = tokio::time::Instant::now();
+        let left = Arc::new(AtomicBool::new(false));
+        let leave_mesh = {
+            let left = Arc::clone(&left);
+            async move {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                left.store(true, Ordering::SeqCst);
+            }
+        };
+        let gated = Arc::new(Mutex::new(None));
+        let stop_listeners = {
+            let gated = Arc::clone(&gated);
+            let tracker = Arc::clone(&tracker);
+            move |drain_timeout| {
+                *gated.lock().expect("no poison") =
+                    Some((start.elapsed(), drain_timeout, tracker.is_draining()));
+            }
+        };
+        // The request ends 8 s in, during the drain.
+        let release = async {
+            tokio::time::sleep(Duration::from_secs(8)).await;
+            drop(request);
+        };
+        let shutdown = graceful_shutdown(
+            &tracker,
+            budget,
+            leave_mesh,
+            || panic!("the leave finished inside the settle window"),
+            stop_listeners,
+        );
+        tokio::join!(shutdown, release);
+        assert!(left.load(Ordering::SeqCst), "the leave ran");
+        assert_eq!(
+            gated.lock().expect("no poison").take(),
+            Some((Duration::from_secs(5), Duration::from_secs(25), true)),
+            "the listeners are gated after the settle window, with the rest of the grace, while \
+             draining"
+        );
+        assert_eq!(
+            start.elapsed(),
+            Duration::from_secs(8),
+            "the drain ended with the request"
+        );
+        assert!(tracker.is_empty());
+    }
+
+    /// A leave that outlasts the settle window is cut short and the mesh is
+    /// stopped outright; the listeners are still gated on time; a request
+    /// that never ends does not hold the shutdown past the deadline.
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_leave_is_cut_short_and_a_stuck_request_holds_nothing_past_the_deadline() {
+        let tracker = InFlightRequestTracker::new();
+        let _stuck = tracker.track();
+        let budget = ShutdownBudget::from_grace_secs(10);
+        let start = tokio::time::Instant::now();
+        let mesh_stopped = Arc::new(AtomicBool::new(false));
+        let gated = Arc::new(Mutex::new(None));
+        graceful_shutdown(
+            &tracker,
+            budget,
+            std::future::pending::<()>(),
+            {
+                let mesh_stopped = Arc::clone(&mesh_stopped);
+                move || mesh_stopped.store(true, Ordering::SeqCst)
+            },
+            {
+                let gated = Arc::clone(&gated);
+                move |drain_timeout| {
+                    *gated.lock().expect("no poison") = Some((start.elapsed(), drain_timeout));
+                }
+            },
+        )
+        .await;
+        assert!(
+            mesh_stopped.load(Ordering::SeqCst),
+            "the leave was cut short"
+        );
+        assert_eq!(
+            gated.lock().expect("no poison").take(),
+            Some((Duration::from_secs(5), Duration::from_secs(5)))
+        );
+        assert_eq!(
+            start.elapsed(),
+            Duration::from_secs(10),
+            "the deadline held"
+        );
+        assert_eq!(
+            tracker.len(),
+            1,
+            "the stuck request is reported, not waited for"
+        );
+    }
+
+    /// With no grace there is no settle window: the leave gets no time (a
+    /// pending one is cut short and the mesh is stopped outright), the
+    /// listeners are gated at once with nothing left, and with nothing in
+    /// flight the drain is skipped.
+    #[tokio::test(start_paused = true)]
+    async fn a_zero_grace_gates_at_once() {
+        let tracker = InFlightRequestTracker::new();
+        let start = tokio::time::Instant::now();
+        let mesh_stopped = Arc::new(AtomicBool::new(false));
+        let gated = Arc::new(Mutex::new(None));
+        graceful_shutdown(
+            &tracker,
+            ShutdownBudget::from_grace_secs(0),
+            std::future::pending::<()>(),
+            {
+                let mesh_stopped = Arc::clone(&mesh_stopped);
+                move || mesh_stopped.store(true, Ordering::SeqCst)
+            },
+            {
+                let gated = Arc::clone(&gated);
+                move |drain_timeout| {
+                    *gated.lock().expect("no poison") = Some((start.elapsed(), drain_timeout));
+                }
+            },
+        )
+        .await;
+        assert!(
+            mesh_stopped.load(Ordering::SeqCst),
+            "a zero grace cuts the leave short"
+        );
+        assert_eq!(
+            gated.lock().expect("no poison").take(),
+            Some((Duration::ZERO, Duration::ZERO))
+        );
+        assert!(tracker.is_draining());
     }
 }
 

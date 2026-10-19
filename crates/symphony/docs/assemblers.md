@@ -16,13 +16,48 @@ with nothing in it, on every path that reads the fragments (a client of the stre
 server call made from the arguments). A member whose key came and whose value never began is not
 one: the call ends with what arrived, and nothing is made up for a value the model botched.
 
-The assembler keeps the promise `ToolCallArguments` makes, that the fragments so far always form a
-valid JSON prefix, as far as the prefix parser can tell: each new run of argument bytes is judged by
-`Prefix`, which accepts what `PartialJson` accepts in prefix mode, before it is emitted, and from
-the first byte it cannot take, the argument bytes come back as `Malformed` with `InvalidArguments`
-instead, nothing already emitted being revised. The prefix parser tolerates what the old crate
-tolerated (a literal's prefix, a bracket closed by the wrong kind where the parent can take it), so
-the promise is exactly as strong as that parser.
+The assembler keeps the promise `ToolCallArguments` makes, that the fragments so far are a prefix
+of JSON a strict reader accepts until the parser says otherwise: each new run of argument bytes is
+judged by `Prefix` before it is emitted, and at the first byte a strict reader refuses, one
+`Malformed { InvalidArguments }` event of no bytes says that the arguments stopped being JSON
+there; the bytes from the break to the value's end are fragments still, the model's own as written,
+nothing already emitted being revised (`json::fragments`). The call so carries exactly what the
+model wrote, and says once that it is no JSON, whole and in pieces alike: a client that reads the
+arguments as JSON is told, at the byte where its own reader would refuse them, and one that shows
+them sees what the model wrote (`"end_range": 2.0 * Math.PI` where a number was due). Cutting the
+fragments at the break and handing the rest back as malformed text, which the readers did before,
+gave a client a call cut at the first bad token and the rest of its arguments as the answer's
+content, and nothing honest can be done with either. The oracle for the break is the template
+reference and the JSON grammar: the template writes a JSON object that the engine's own server
+hands to a strict reader (`json.loads`, `serde_json`, a client's library), so a call its terminal
+closed is whole only if such a reader takes its arguments. The judge therefore refuses what the
+partial parser (`PartialJson`, the old crate's reader) tolerated and JSON lacks, each at its first
+byte, whole and in pieces alike:
+
+- a value left out before a comma or a close (`{"days": ,}`, `[,,]`) and a trailing comma before a
+  close (`{"days": 3, }`): refused at the comma or the close that stands where a value or a key
+  must;
+- an escape JSON lacks (`"Pa\yris"`), a `\u` escape with fewer than four hex digits
+  (`"\u12G4"`) and a surrogate escape without its other half: refused from the escape's
+  backslash, which is held until the escape is decided (a letter JSON knows, four hex digits that
+  are a character or a pair), so no fragment ends inside an escape and the fragments end before
+  the one the reader refuses, whichever byte of it the reader names;
+- a bracket closed by the wrong kind (`{"a": [1}`) and whitespace JSON lacks between tokens (a
+  no-break space, an ideographic space): refused at the character;
+- a number or a word cut short before a delimiter (`1.}`, `-]`, `nu}`): refused at the delimiter,
+  or from the word's first letter, which the readers hold until the word is decided.
+
+A raw control character inside a string is the one thing JSON lacks that is let through, escaped
+rather than refused (the next paragraph), since the engines' own servers re-serialize what their
+partial reader took and hand out the escape; nothing else is normalized, since no engine's reader
+takes it. A value the outline ended and a strict reader does not take whole (a number or a word the
+object's brace stops, `"arguments": 12.}`) is said to be none by a `Malformed` event of no bytes
+before the call's end, as at the stream's end. The value reader (`json::arguments`) and the Mistral
+object reader (`json::named_arguments`) judge and say the same. The contract tests
+(`tests/contract.rs`) check both halves of the promise under every chunking: a fragment never takes
+a call's arguments past a prefix a strict reader accepts until the break is said, every fragment
+after it is the model's bytes as written, and a call that closed without a `Malformed` event has
+arguments a strict reader parses whole.
 
 A raw control character inside a string (U+0000..U+001F: a newline in a multi-line value, a tab
 in code), which JSON forbids there and no strict reader accepts, is written in the fragment as its
@@ -109,9 +144,15 @@ tag, the template's newline) or no bytes when the cut fell between events. The f
 since a fragment passed on cannot be taken back, and nothing is made up for a value the model never
 finished; the four assemblers of `tagged` share that end (`tagged::end_cut_call`).
 
-`feed` takes one piece and returns how many of its bytes the call took: all of them before
-`</function>`, and up to that tag in the piece that carries it, so the format routes whatever
-follows (the block's closing marker, more text) itself.
+`feed` takes one piece and takes every byte of it: the block's calls follow one another, and the
+block's closing marker is the format's to read. The templates write one function block per call
+region, and a model answering with several calls at once writes them one after another inside one
+region, which the engines' own parsers read as the calls they are; so after `</function>` the
+assembler stays in the block. Whitespace there is the template's and goes into the next event's
+source, the next `<function=` starts the next call at the next index with the id that index mints,
+and anything else is `Malformed { TextBetweenCalls }`. A region that ends after its last call
+closed ends nothing: the whitespace after the call is dropped, and a tag the end cut short is
+reported.
 
 ## The keyed assembler (`tagged::keyed`)
 
@@ -122,7 +163,7 @@ What the syntax says, and what the assembler does with it:
   next event's source. The name is known only when that tag arrives, so `ToolCallStart` waits
   for it; names are short. A name holds no whitespace, quote, brace, bracket, parenthesis or
   angle bracket: any other text there (the JSON of a `<tool_call>` block quoted inside a code
-  fence, prose, a call written as Python) is reported, and no call starts, so a block that names
+  fence, prose, a call written as Python) is refused, and no call starts, so a block that names
   no call writes no arguments either.
 - **A value's type comes from the request's tools**, as in the Qwen assembler: a declared string
   is its text, streamed as it arrives; every other value is written whole at `</arg_value>`
@@ -132,18 +173,31 @@ What the syntax says, and what the assembler does with it:
 - **Inside a value only `</arg_value>` is a tag**; the other three there are the value's text.
 - **Two endings.** `Assembler::close` is the call's closing marker, or the block's end before
   it: after the last value it names the call if it has not, closes the object and pushes
-  `ToolCallEnd` with the marker's bytes; inside a value held for its close it reports what was
+  `ToolCallEnd` with the marker's bytes; inside a value held for its close it refuses what was
   held and closes the object without that member; inside a streamed string it closes nothing,
-  since nothing is made up for a value the model never finished, and the one `Malformed` event
-  before the end, with what was held or no bytes, says that the arguments are no whole value
-  (`tagged::end_cut_call`). `Assembler::finish` is a stream that was cut: nothing is closed,
-  and a started call ends as the Qwen assembler's does, after one `Malformed { UnterminatedRegion }`
-  event, with what was held or no bytes, that says its arguments are no whole value
-  (`tagged::end_cut_call`).
+  since nothing is made up for a value the model never finished: what was held is refused, and
+  the one `Malformed` event of no bytes before the end says that the arguments are no whole
+  value (`tagged::end_cut_call`). `Assembler::finish` is a stream that was cut: nothing is
+  closed, what was held is refused, and a started call ends as the Qwen assembler's does, after
+  one `Malformed { UnterminatedRegion }` event of no bytes that says its arguments are no whole
+  value (`tagged::end_cut_call`).
+- **Nothing the syntax cannot read is content** (`tagged::refuse`). The block's markers and its
+  four tags are the format's own tokens, and the text between them where the syntax has no place
+  for text (a value whose key never opened, a tag written twice, a name that is prose, Python or
+  JSON) is the model's failed call: the families' own parsers drop such a block whole, and a
+  client shown it saw the format's tags at the end of the answer (`</arg_key><arg_value>1975
+  </arg_value>`, in 20 of 292 answers of a live cell). Such bytes are refused: a `Malformed`
+  event of no bytes with the reason stands where the bytes do, so a reader counts the failure at
+  its offset, and the bytes leave as `Dropped { MalformedCall }`, never as content (at a cut
+  call's end the bytes held come first and the one event of no bytes stands after them, before
+  `ToolCallEnd`, as `tagged::end_cut_call` has it); a call that started keeps the pairs it read
+  (`{}` when none), and a block that named no call has every byte refused, the marker that
+  closed it included. The attributed, XML and Qwen-tagged
+  assemblers still carry such bytes in the `Malformed` event, which the adapters show.
 - **Every byte of the call lands in exactly one event**, with the Qwen assembler's accounting:
   the name's bytes in `ToolCallStart`, each tag's and value's bytes in the fragments they
-  produce, text where the syntax has tags as `Malformed` run by run with the whitespace before
-  it as `Dropped { Wrapper }`.
+  produce, the whitespace the template writes between tags as `Dropped { Wrapper }`, and what
+  the syntax cannot read as `Dropped { MalformedCall }` behind its `Malformed` event of no bytes.
 
 ## The attributed assembler (`tagged::attributed`)
 
@@ -322,12 +376,33 @@ What the syntax says, and what the assembler does with it:
 - **Two endings.** `Assembler::close` is the region's closing marker (or the next opener):
   a call still open is closed for the client, an open argument's bytes and a name that never
   got its `(` come back as `Malformed`, and the list's wrapping before any call is dropped.
-  `Assembler::finish` is a stream that was cut: nothing is closed, what was held comes back
-  as `Malformed { UnterminatedRegion }`, and a call that started still ends, with no bytes of
-  its own, as every assembler ends one.
+  `Assembler::finish` is a stream that was cut: nothing is closed, and a call that started
+  still ends, with no bytes of its own, as every assembler ends one, after the one `Malformed {
+  UnterminatedRegion }` event that says its arguments are no whole value
+  (`tagged::end_cut_call`): it carries what was held, a key, a value or a separator cut short,
+  or no bytes when the cut came right after the `(`, so that a call the end cut before its `)`
+  is never handed over as finished without a word. Outside a call, what was held, a name that
+  never got its `(` or the list's wrapping, comes back as `Malformed { UnterminatedRegion }` too.
 - **Python's whitespace is allowed** between a name and its `(`, around the `=`, and around a
   value, as the old parser's regular expression allowed it; a name or a key is the text less
   that whitespace.
+- **A list bare in the turn** (`Assembler::bare`, which the engine picks for a table no row of
+  which enters the arguments state, as it picks the bare JSON list): a `[` is held with the name
+  after it until a `(` says it opens a list, or anything else gives it back as content. At the
+  turn's start, after whitespace alone, the list then reads as between markers, as it arrives.
+  After content, a list whose first name no tool declares is content from its `(`; any other list
+  is held until the `]` that closes it (strings and nested brackets scanned, given back as content
+  past 256 KiB) and read whole by an assembler of its own: when every byte is a call's or the list's
+  wrapping and every call names a tool the request declares, its events are the turn's; when any
+  byte is malformed (a positional argument, an operator, prose between calls) or a name is no
+  tool's, the whole is content, since code holds `[name(` of its own. After the
+  list's `]` whitespace is wrapping and anything else malformed, as after xLAM's list. A stream
+  cut while a `[` or a list is held gives it back as content, since no call began.
+- **A dialect whose quotes carry no type** (`Values::Quoted`, Llama 4's template writing `"%s"`
+  of every value): the text between a value's double quotes, as written and with no escape
+  decoded, is typed by the kind the request's tool declares for the parameter, through the value
+  module's `json`, or by its text where none is declared; a bare value, a single-quoted Python
+  string included, reads as under the other dialects.
 
 Ported in spirit from the old crate's pythonic parser, which compiled a regular expression per call
 and read the arguments with a Python-literal evaluator at the end; here the arguments are read as

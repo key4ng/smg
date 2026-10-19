@@ -1,5 +1,6 @@
 //! Shared utilities for gRPC routers.
 
+mod aliases;
 mod chat_utils;
 mod logprobs;
 pub(crate) mod message_utils;
@@ -10,16 +11,17 @@ pub(crate) mod stream_failure;
 pub(crate) mod tonic_ext;
 
 // Re-export all public items so consumer imports stay unchanged.
+pub use aliases::{answering_to, ALIASES, UNANSWERED};
+pub(crate) use chat_utils::{
+    completion_finish_reason, encode_blocking, encode_prompt_blocking,
+    filter_chat_request_by_tool_choice, filter_tools_by_tool_choice, generate_tool_call_id,
+    keep_first_tool_call, keep_first_tool_call_items, missing_tokenizer_response,
+    parse_finish_reason, parse_json_schema_response, process_chat_messages_with_placeholders,
+    resolve_tokenizer, send_error_sse, validate_chat_content_parts,
+};
 pub use chat_utils::{
     create_stop_decoder, process_chat_messages, process_chat_messages_with_encoding,
     request_as_rendered,
-};
-pub(crate) use chat_utils::{
-    encode_blocking, encode_prompt_blocking, filter_chat_request_by_tool_choice,
-    filter_tools_by_tool_choice, generate_tool_call_id, keep_first_tool_call,
-    keep_first_tool_call_items, missing_tokenizer_response, parse_finish_reason,
-    parse_json_schema_response, process_chat_messages_with_placeholders, resolve_tokenizer,
-    send_error_sse, validate_chat_content_parts,
 };
 pub(crate) use logprobs::{
     convert_generate_input_logprobs, convert_generate_output_logprobs, convert_proto_logprobs,
@@ -37,7 +39,7 @@ pub(crate) use parsers::{
     rendered_prompt_reasoning_in_prefill, tool_constraints_for_worker, ModelNames, Names,
     ParserResolver, WorkerDecoding,
 };
-pub(crate) use pd_bootstrap::account_pd_leg_failure;
+pub(crate) use pd_bootstrap::account_pd_side_failure;
 pub(crate) use stream_failure::{send_stream_failure, StreamFailure, StreamSource};
 
 /// One WARN per choice whose stream recovered from a rewritten decode prefix

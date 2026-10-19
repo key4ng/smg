@@ -535,6 +535,7 @@ struct Router {
     mm_pixel_cache_mb: Option<usize>,
     mm_pixel_rdma: bool,
     mm_processing: Option<String>,
+    mm_turbojpeg: Option<String>,
     model_aliases: HashMap<String, String>,
     model_id_from: Option<String>,
     model_path: Option<String>,
@@ -808,6 +809,19 @@ impl Router {
                 })
             })
             .transpose()?;
+        let mm_turbojpeg = self
+            .mm_turbojpeg
+            .as_deref()
+            .map(|value| {
+                config::TurboJpegPolicy::parse(value).ok_or_else(|| {
+                    config::ConfigError::InvalidValue {
+                        field: "mm_turbojpeg".to_string(),
+                        value: value.to_string(),
+                        reason: "expected 'prefer' or 'require'".to_string(),
+                    }
+                })
+            })
+            .transpose()?;
 
         // The access-log fields by name, each spelled as the record keys it.
         let access_log_fields = self
@@ -857,11 +871,9 @@ impl Router {
                     selection_accounting_ttl_ms: self.selection_accounting_ttl_ms,
                 },
                 PolicyType::PowerOfTwo => ConfigPolicyConfig::PowerOfTwo {
-                    load_check_interval_secs: self.load_monitor_interval,
                     load_metric: power_of_two_load_metric,
                 },
                 PolicyType::LeastLoad => ConfigPolicyConfig::LeastLoad {
-                    load_check_interval_secs: self.load_monitor_interval,
                     kv_pressure_weight: self.least_load_kv_pressure_weight,
                     mean_prefill_tokens: self.least_load_mean_prefill_tokens,
                     default_throughput: self.least_load_default_throughput,
@@ -1215,6 +1227,7 @@ impl Router {
             .mm_pixel_rdma(self.mm_pixel_rdma)
             .mm_allowed_media_domains(self.mm_allowed_media_domains.clone())
             .mm_allow_private_media_hosts(self.mm_allow_private_media_hosts)
+            .mm_turbojpeg(mm_turbojpeg)
             .rdma_listen_ip(self.rdma_listen_ip.clone())
             .rdma_slot_ttl_s(self.rdma_slot_ttl_s)
             .log_mm_timing(self.log_mm_timing)
@@ -1358,6 +1371,7 @@ impl Router {
         mm_pixel_cache_mb = None,
         mm_pixel_rdma = false,
         mm_processing = None,
+        mm_turbojpeg = None,
         model_aliases = HashMap::new(),
         model_id_from = None,
         model_path = None,
@@ -1565,6 +1579,7 @@ impl Router {
         mm_pixel_cache_mb: Option<usize>,
         mm_pixel_rdma: bool,
         mm_processing: Option<String>,
+        mm_turbojpeg: Option<String>,
         model_aliases: HashMap<String, String>,
         model_id_from: Option<String>,
         model_path: Option<String>,
@@ -1802,6 +1817,7 @@ impl Router {
             mm_pixel_cache_mb,
             mm_pixel_rdma,
             mm_processing,
+            mm_turbojpeg,
             model_aliases,
             model_id_from,
             model_path,
@@ -2089,8 +2105,9 @@ fn get_available_tool_call_parsers() -> Vec<String> {
 /// The choices of one parser flag: the names `legacy` picks from the two legacy registries (the
 /// flag's own kind), Symphony's tables' (`symphony::formats::Table::name`), which `--parser
 /// symphony` reads with when both flags name one, the names a table answers to that no legacy
-/// parser of either kind has (`symphony::formats::Table::ALIASES`: a launcher's name for a model
-/// family whose table has no older parser, which the gateway takes in either flag), and `hf`,
+/// parser of either kind has (the gateway's `utils::ALIASES`: an engine's exact parser name for a
+/// family, or a launcher's name for one whose table has no older parser, which the gateway takes
+/// in either flag), and `hf`,
 /// the table a model's response template compiles into, sorted, each once.
 fn parser_choices(
     legacy: impl FnOnce(&tool_parser::ParserFactory, &reasoning_parser::ParserFactory) -> Vec<String>,
@@ -2104,7 +2121,7 @@ fn parser_choices(
             .map(|table| table.name().to_string()),
     );
     names.extend(
-        symphony::formats::Table::ALIASES
+        routers::grpc::utils::ALIASES
             .iter()
             .map(|(alias, _)| *alias)
             .filter(|alias| !tools.has_parser(alias) && !reasoning.registry().has_parser(alias))

@@ -11,8 +11,11 @@
 //!   them;
 //! - well-formedness: arguments and an end only for a call that has started and not ended, one
 //!   start per index, reasoning text only inside an open region, exactly one `Finish`, counting the
-//!   calls that started, after every fragment each call's arguments so far a valid JSON prefix,
-//!   which is what prefix stability promises a client, and a call that ended, by its own
+//!   calls that started, after every fragment each call's arguments so far a prefix of JSON a
+//!   strict reader accepts, which is what prefix stability promises a client, until a
+//!   `Malformed { InvalidArguments }` event of no bytes says where they stopped being one, from
+//!   which every fragment is the model's bytes as written (`json` equal to `source`), so that
+//!   the call carries exactly what the model wrote, and a call that ended, by its own
 //!   terminal, the region's or the end of the stream, has arguments that are whole JSON unless a
 //!   `Malformed` event came while it was open, so that a client is never handed a cut call as a
 //!   whole one without a word, and a fragment that closes a string the arguments left open
@@ -42,7 +45,6 @@ use serde_json::json as value;
 use symphony::{
     format::CallId,
     formats::{self, Table},
-    json::PartialJson,
     shape::{
         self, Arguments, Atom, CallShape, Class, Dialect, End, NameSource, Path, Pattern, Slot,
         ValueParser,
@@ -283,6 +285,10 @@ fn lfm2_5() -> Box<dyn Parser> {
     Box::new(Engine::new(Table::Lfm2_5.format(), Declared::default()))
 }
 
+fn llama4() -> Box<dyn Parser> {
+    Box::new(Engine::new(Table::Llama4.format(), recorded_tools()))
+}
+
 fn xlam() -> Box<dyn Parser> {
     Box::new(Engine::new(Table::Xlam.format(), Declared::default()))
 }
@@ -408,6 +414,17 @@ fn deepseek_v3_2() -> Box<dyn Parser> {
     ))
 }
 
+fn deepseek_v3_1() -> Box<dyn Parser> {
+    Box::new(Engine::new(
+        Table::DeepSeekV3_1.format(),
+        Declared::default(),
+    ))
+}
+
+fn deepseek_v3() -> Box<dyn Parser> {
+    Box::new(Engine::new(Table::DeepSeekV3.format(), Declared::default()))
+}
+
 fn json() -> Box<dyn Parser> {
     Box::new(Engine::new(Table::Json.format(), Declared::default()))
 }
@@ -438,6 +455,14 @@ fn gemma4() -> Box<dyn Parser> {
 
 fn inkling() -> Box<dyn Parser> {
     Box::new(Engine::new(Table::Inkling.format(), Declared::default()))
+}
+
+/// Inkling as a request without tools reads it: the message header content, its markers dropped.
+fn inkling_without_calls() -> Box<dyn Parser> {
+    Box::new(Engine::new(
+        Table::Inkling.format().without_calls(),
+        Declared::default(),
+    ))
 }
 
 /// `\w` as these outputs need it: the ASCII letters, digits and `_` their names are written in.
@@ -870,6 +895,12 @@ const FORMATS: &[Subject] = &[
         table: Some(Table::Lfm2_5),
     },
     Subject {
+        name: "llama4",
+        new: llama4,
+        outputs: LLAMA4_OUTPUTS,
+        table: Some(Table::Llama4),
+    },
+    Subject {
         name: "xlam",
         new: xlam,
         outputs: XLAM_OUTPUTS,
@@ -924,6 +955,18 @@ const FORMATS: &[Subject] = &[
         table: Some(Table::DeepSeekV3_2),
     },
     Subject {
+        name: "deepseek v3.1",
+        new: deepseek_v3_1,
+        outputs: DEEPSEEK_V3_1_OUTPUTS,
+        table: Some(Table::DeepSeekV3_1),
+    },
+    Subject {
+        name: "deepseek v3",
+        new: deepseek_v3,
+        outputs: DEEPSEEK_V3_OUTPUTS,
+        table: Some(Table::DeepSeekV3),
+    },
+    Subject {
         name: "json",
         new: json,
         outputs: JSON_OUTPUTS,
@@ -970,6 +1013,12 @@ const FORMATS: &[Subject] = &[
         new: inkling,
         outputs: INKLING_OUTPUTS,
         table: Some(Table::Inkling),
+    },
+    Subject {
+        name: "inkling, no tools",
+        new: inkling_without_calls,
+        outputs: INKLING_NO_TOOLS_OUTPUTS,
+        table: None,
     },
     Subject {
         name: "mistral v13",
@@ -1107,6 +1156,7 @@ const GPT_OSS_OUTPUTS: &[&str] = &[
     "<|channel|>commentary to=functions.f<|message|>not json",
     "<|channel|>commentary to=functions.f<|message|>{} trailing",
     "",
+    "<|channel|>commentary to=functions.get_weather<|message|>{\"city\": \"Paris\", \"days\": ,}",
 ];
 
 /// Calls on abstract tags: a call its trailer closes, terminals whose header does not match (in
@@ -1341,6 +1391,9 @@ const PLAIN_OUTPUTS: &[&str] = &[
 
 /// A bare JSON list of calls, or prose.
 const XLAM_OUTPUTS: &[&str] = &[
+    // Arguments that are not JSON (an expression where a number should be): the call carries
+    // them as written, and says once that they are no JSON.
+    "[{\"name\": \"plot_sine_wave\", \"arguments\": {\"start_range\": 0, \"end_range\": 2.0 * Math.PI, \"frequency\": 5}}]",
     "[{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}, \
      {\"name\": \"get_stock_price\", \"arguments\": {}}]",
     "[{\"name\": \"get_weather\", \"argu",
@@ -1350,6 +1403,7 @@ const XLAM_OUTPUTS: &[&str] = &[
     "Hello, [not a list].",
     "",
     "[{\"name\": \"get_weather\"}]",
+    "[{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\",}}]",
 ];
 
 /// Python calls as Olmo 3 writes them: bare, one per line.
@@ -1358,6 +1412,8 @@ const OLMO3_OUTPUTS: &[&str] = &[
      [1, 2.5, true, null]})\nget_stock_price()</function_calls>",
     "<function_calls>get_weather(city=\"Par",
     "<function_calls>get_weather(city=\"Paris\"",
+    "<function_calls>get_weather(",
+    "<function_calls>get_weather(city=\"Paris\")\nget_stock_price(",
     "<function_calls>I will call:\nget_weather(city=\"a)b\", n=-1.5e3)</function_calls>\nDone.",
     "<function_calls></function_calls>",
     "Hello!",
@@ -1368,14 +1424,36 @@ const LFM_OUTPUTS: &[&str] = &[
     "<|tool_call_start|>[get_weather(city='Paris', note='it\\'s fine'), get_stock_price()]\
      <|tool_call_end|>",
     "<|tool_call_start|>[get_weather(city='Par",
+    "<|tool_call_start|>[get_weather(",
+    "<|tool_call_start|>[get_weather(ci",
+    "<|tool_call_start|>[get_weather(city='Paris', ",
+    "<|tool_call_start|>[get_weather(city='Paris'), get_stock_price(",
     "<think>The user asks.</think><|tool_call_start|>[get_weather(city='計画 🌍 \"q\"')]\
      <|tool_call_end|>",
     "<|tool_call_start|>[]<|tool_call_end|>Nothing to call.",
 ];
 
+/// Python calls as Llama 4 writes them: a list bare in the turn, every value in double quotes,
+/// after the content when the turn has both; the markers the model may put around them; prose
+/// with brackets in it; text after the list; and one cut short.
+const LLAMA4_OUTPUTS: &[&str] = &[
+    "[get_weather(city=\"Paris\", days=\"3\"), get_stock_price()]",
+    "Let me check.[get_weather(city=\"Paris\", unit=\"celsius\")]",
+    "[save_note(title=\"計画 🌍\", tags=\"['a', 'b']\", meta=\"{'deep': [1, 2.5, True, None]}\")]",
+    "<|python_start|>[get_weather(city='Paris', days=3)]<|python_end|>",
+    "<|python_start|>print(1)<|python_end|>",
+    "See [1] and [a link](https://example.com); the list [a, b] is prose.",
+    "[get_weather(city=\"Paris\")]\n\nDone.",
+    "[get_weather(\"Paris\", days=3) junk, get_stock_price()] after",
+    "Hello!",
+    "[get_wea",
+    "[get_weather(city=\"Par",
+];
+
 /// Mistral's calls: the tool's name, `[ARGS]`, the arguments object alone, one call per opener,
 /// the thought between `[THINK]` and `[/THINK]`.
 const MISTRAL_OUTPUTS: &[&str] = &[
+    "[TOOL_CALLS]plot_sine_wave[ARGS]{\"start_range\": 0, \"end_range\": 2.0 * Math.PI, \"frequency\": 5}",
     "[TOOL_CALLS]get_weather[ARGS]{\"city\": \"Paris\", \"days\": [1, 2.5, true, null]}",
     "[TOOL_CALLS]get_weather[ARGS]{\"city\": \"Paris\"}[TOOL_CALLS]get_stock_price[ARGS]{}",
     "Let me check.[TOOL_CALLS]get_weather[ARGS]{\"city\": \"Paris\"}",
@@ -1388,11 +1466,15 @@ const MISTRAL_OUTPUTS: &[&str] = &[
     "[THINK]Only a thought.[/THINK]",
     "Hello!",
     "[TOOL_CALLS]get_weather[ARGS]{\"city\": \"Pa\nris\"}",
+    // A trailing comma and a value left out, at a call its object's brace closes.
+    "[TOOL_CALLS]get_weather[ARGS]{\"city\": \"Paris\", }",
+    "[TOOL_CALLS]get_weather[ARGS]{\"city\": ,}[TOOL_CALLS]get_stock_price[ARGS]{}",
 ];
 
 /// Llama Nemotron's calls: one JSON list between `<TOOLCALL>` and `</TOOLCALL>`, content before
 /// it, the thought between `<think>` and `</think>`; the list cut, empty, or not a list.
 const LLAMA_NEMOTRON_OUTPUTS: &[&str] = &[
+    "<TOOLCALL>[{\"name\": \"plot_sine_wave\", \"arguments\": {\"start_range\": 0, \"end_range\": 2.0 * Math.PI, \"frequency\": 5}}]</TOOLCALL>",
     "<TOOLCALL>[{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\", \"days\": \
      [1, 2.5, true, null]}}]</TOOLCALL>",
     "<TOOLCALL>[{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}, \
@@ -1434,6 +1516,7 @@ const FUNCTION_GEMMA_OUTPUTS: &[&str] = &[
 /// The forced call's arguments alone, as the engine writes them under the gateway's schema for a
 /// named function: whole, wrapped in whitespace, cut short, broken, followed by text, blank.
 const FORCED_OUTPUTS: &[&str] = &[
+    "{\"start_range\": 0, \"end_range\": 2.0 * Math.PI, \"frequency\": 5}",
     "{\"city\": \"Paris\", \"days\": [1, 2.5, true, null]}",
     "  {\"city\": \"Paris\"}\n",
     "{\"city\": \"Par",
@@ -1443,6 +1526,11 @@ const FORCED_OUTPUTS: &[&str] = &[
     "   ",
     "[1, 2]",
     "{\"city\": \"Pa\nris\"}",
+    // A trailing comma, a value left out and an escape JSON lacks, at a value the stream's end
+    // closes.
+    "{\"city\": \"Paris\", }",
+    "{\"city\": \"Paris\", \"days\": ,}",
+    "{\"city\": \"Pa\\yris\"}",
 ];
 
 /// Seed-OSS: the tagged syntax under its own markers, a value as Python's repr, and Qwen's
@@ -1462,6 +1550,23 @@ const SEED_OUTPUTS: &[&str] = &[
     "<think>not a thought</think><tool_call>not a call</tool_call><seed:think>a thought",
     "<seed:tool_call>\n<function=get_weather>\n<parameter=city>\n計画 🌍 \"q\" \\ \n</parameter>\n\
      </function>\n</seed:tool_call>",
+    // A parallel answer's calls one after another in one region: the tags on one line, and one
+    // per line with text between the blocks and a block the region's close cuts.
+    "<seed:tool_call><function=get_weather><parameter=city>Paris</parameter><parameter=days>3\
+     </parameter></function><function=other><parameter=note>None</parameter></function>\
+     </seed:tool_call>",
+    "<seed:tool_call>\n<function=get_weather>\n<parameter=city>Paris</parameter>\n</function>\n\
+     then\n<function=other>\n</function>\n<function=get_weather>\n<parameter=city>Par\
+     </seed:tool_call>",
+    // A forced call as its tag writes it after the thought's close (the template's newline, then
+    // the call), the format rehearsed inside the thought; and the same call an engine's reasoning
+    // gate started inside the thought, marker written twice, the output ending there.
+    "<seed:think>the format with <seed:tool_call>\n<function=get_weather>\n<parameter=city>Paris\
+     </parameter>\n</function>\n</seed:tool_call>. Then call it.</seed:think>\n<seed:tool_call>\n\
+     <function=get_weather>\n<parameter=city>Paris</parameter>\n<parameter=days>3</parameter>\n\
+     </function>\n</seed:tool_call>",
+    "<seed:think>the format with <seed:tool_call><seed:tool_call>\n<function=get_weather>\n\
+     <parameter=city>Paris</parameter>\n</function>\n</seed:tool_call>",
     "",
 ];
 
@@ -1668,9 +1773,13 @@ const QWEN3_TAGGED_OUTPUTS: &[&str] = &[
     "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n</tool_call>",
     "<think>plan</think><tool_call>\n<function=get_weather>\n<parameter=city>\n計画 🌍 \"q\" \\ \n\
      </parameter>\n</function>\n</tool_call>",
+    // Two function blocks in one `<tool_call>` block, as a parallel answer may write them.
+    "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n\
+     <function=other>\n<parameter=days>\n3\n</parameter>\n</function>\n</tool_call>",
 ];
 
 const QWEN3_OUTPUTS: &[&str] = &[
+    "<tool_call>\n{\"name\": \"plot_sine_wave\", \"arguments\": {\"start_range\": 0, \"end_range\": 2.0 * Math.PI, \"frequency\": 5}}\n</tool_call>",
     "",
     "Hello!",
     "<think>\n\n</think>\n\nHello!",
@@ -1701,6 +1810,24 @@ const QWEN3_OUTPUTS: &[&str] = &[
     // stays.
     "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Pa\nris\", \"days\": 3}}\n</tool_call>",
     "<tool_call>{\"name\": \"f\", \"arguments\": {\"k\u{12}\": \"\\\n\u{1}\",\n\"t\": \"a\tb\"}}</tool_call>",
+    // What the partial parser tolerates and a strict reader refuses, at a call its own marker
+    // closes: a value left out, a trailing comma after a value and after a member, list items left
+    // out, an escape JSON lacks, a `\u` escape short of four hex digits, a bracket of the wrong
+    // kind, whitespace JSON lacks, a number and a word cut short before the close, and a number
+    // and a word the object's own brace cuts short. The fragments stop at the first byte the
+    // reader refuses; the rest, or nothing, is said to be malformed before the end.
+    "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\", \"days\": ,}}\n</tool_call>",
+    "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\", \"days\": 3, }}\n</tool_call>",
+    "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\",}}\n</tool_call>",
+    "<tool_call>{\"name\": \"f\", \"arguments\": {\"tags\": [,,]}}</tool_call>",
+    "<tool_call>{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Pa\\yris\"}}</tool_call>",
+    "<tool_call>{\"name\": \"get_weather\", \"arguments\": {\"city\": \"\\u12G4\"}}</tool_call>",
+    "<tool_call>{\"name\": \"f\", \"arguments\": {\"a\": [1}}</tool_call>",
+    "<tool_call>{\"name\": \"f\", \"arguments\": {\"a\":\u{a0}1}}</tool_call>",
+    "<tool_call>{\"name\": \"f\", \"arguments\": {\"n\": 1.}}</tool_call>",
+    "<tool_call>{\"name\": \"f\", \"arguments\": {\"flag\": nu}}</tool_call>",
+    "<tool_call>{\"name\": \"f\", \"arguments\": 1.}</tool_call>",
+    "<tool_call>{\"name\": \"f\", \"arguments\": nu}</tool_call>",
 ];
 
 /// The outputs bellwether's common set records for MiMo-V2.5 (Qwen 3.5's tags, the value between
@@ -1715,6 +1842,7 @@ const QWEN3_TAGGED_DIRECT_OUTPUTS: &[&str] = &[
     "Hello!",
     "<tool_call>\n<function=get_weather>\n<parameter=city>Par",
     "<tool_call>\n<function=get_weather>\n<parameter=city>Par</tool_call>",
+    "<tool_call>\n<function=get_weather>\n<parameter=city>Paris</parameter>\n</function>\n<function=get_stock_price>\n<parameter=ticker>AAPL</parameter>\n</function>\n</tool_call>",
 ];
 
 /// DeepSeek V4's DSML as its reference encoder renders it (the thought the prompt opens written
@@ -1743,8 +1871,37 @@ const DEEPSEEK_V3_2_OUTPUTS: &[&str] = &[
     "<｜DSML｜function_calls>\n<｜DSML｜invoke name=\"get_weather\">\n<｜DSML｜parameter name=\"location\" string=\"true\">Par",
 ];
 
+/// DeepSeek V3.1's calls as its chat template renders them (the thought the prompt opens written
+/// here, since the replay starts from an empty prompt): one call after a thought, three calls in
+/// one block, a call after content, no arguments, nested values, content with a thought, content
+/// alone, and one cut short.
+const DEEPSEEK_V3_1_OUTPUTS: &[&str] = &[
+    "<think>The user asks about Paris.</think><｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{\"city\": \"Paris\"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>",
+    "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{\"city\": \"Paris\"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{\"city\": \"Rome\"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_stock_price<｜tool▁sep｜>{\"ticker\": \"MSFT\"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>",
+    "Let me check.<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{\"city\": \"Paris\", \"unit\": \"celsius\"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>",
+    "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_stock_price<｜tool▁sep｜>{}<｜tool▁call▁end｜><｜tool▁calls▁end｜>",
+    "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>save_note<｜tool▁sep｜>{\"title\": \"計画 🌍\", \"body\": \"a \\\"q\\\" \\\\ b\\nc\", \"tags\": [\"a\", \"b\"], \"meta\": {\"nested\": {\"deep\": [1, 2.5, true, null]}}}<｜tool▁call▁end｜><｜tool▁calls▁end｜>",
+    "<think>97 is not divisible by 2, 3, 5 or 7.</think>Yes, 97 is prime.",
+    "Hello!",
+    "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{\"city\": \"Par",
+];
+
+/// DeepSeek V3's calls as its chat template renders them: one call, three calls in one block (a
+/// newline before each after the first), a call after content, no arguments, nested values,
+/// content alone, and one cut short inside the fence.
+const DEEPSEEK_V3_OUTPUTS: &[&str] = &[
+    "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{\"city\": \"Paris\"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>",
+    "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{\"city\": \"Paris\"}\n```<｜tool▁call▁end｜>\n<｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{\"city\": \"Rome\"}\n```<｜tool▁call▁end｜>\n<｜tool▁call▁begin｜>function<｜tool▁sep｜>get_stock_price\n```json\n{\"ticker\": \"MSFT\"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>",
+    "Let me check.<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{\"city\": \"Paris\", \"unit\": \"celsius\"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>",
+    "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_stock_price\n```json\n{}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>",
+    "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>save_note\n```json\n{\"title\": \"計画 🌍\", \"body\": \"a \\\"q\\\" \\\\ b\\nc\", \"tags\": [\"a\", \"b\"], \"meta\": {\"nested\": {\"deep\": [1, 2.5, true, null]}}}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>",
+    "Hello!",
+    "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{\"city\": \"Par",
+];
+
 /// Llama 3.1's bare call object, a list of them, content, and one cut short.
 const JSON_OUTPUTS: &[&str] = &[
+    "{\"name\": \"plot_sine_wave\", \"arguments\": {\"start_range\": 0, \"end_range\": 2.0 * Math.PI, \"frequency\": 5}}",
     "{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Paris\"}}",
     "[{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}, {\"name\": \"get_stock_price\", \"arguments\": {\"ticker\": \"AAPL\"}}]",
     "{\"name\": \"save_note\", \"parameters\": {\"title\": \"計画 🌍\", \"body\": \"a \\\"q\\\" \\\\ b\\nc\"}}",
@@ -1753,6 +1910,18 @@ const JSON_OUTPUTS: &[&str] = &[
     "{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Par",
     "{\"name\": \"f\", \"arguments\": {}} and then some",
     "{\"name\": \"get_weather\"}",
+    "{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Paris\", }}",
+    // Llama 3.1's models write the call behind the template's call token, and parallel calls
+    // with `; ` between the objects (verbatim from a served checkpoint); the token before prose,
+    // a `;` nothing follows, and the token cut short.
+    "<|python_tag|>{\"name\": \"get_stock_info\", \"parameters\": {\"company_name\": \"Apple Inc.\", \"detail_level\": \"detailed\", \"market\": \"NASDAQ\"}}",
+    "<|python_tag|>{\"name\": \"scientist_info_get_birthdate\", \"parameters\": {\"name\": \"Nikola Tesla\"}}; {\"name\": \"scientist_info_get_famous_discovery\", \"parameters\": {\"name\": \"Nikola Tesla\", \"discovery_order\": \"1\"}}",
+    "{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Paris\"}};{\"name\": \"get_stock_price\", \"parameters\": {\"ticker\": \"AAPL\"}} ;\n {\"name\": \"f\"}",
+    "<|python_tag|>I cannot help with that.",
+    "\n<|python_tag|>\n{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Paris\"}}; ",
+    "<|python_tag|>{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Par",
+    "<|python_ta",
+    "Sure: <|python_tag|>{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Paris\"}}",
 ];
 
 /// The outputs bellwether's common set records for MiniMax M2 (the thought the prompt opens
@@ -1861,6 +2030,17 @@ const INKLING_OUTPUTS: &[&str] = &[
     "<|content_text|><|end_message|><|message_model|>get_weather<|content_invoke_tool_json|>{\"name\":\"get_weather\"}<|end_message|>",
 ];
 
+/// Outputs recorded from requests that declared no tools: a thought and a short answer, a thought
+/// and a longer one, a JSON answer whose grammar wrote the text marker again after the model's
+/// own, the common set's call written without tools, and one cut inside the answer.
+const INKLING_NO_TOOLS_OUTPUTS: &[&str] = &[
+    "<|content_thinking|>We need solve math problem. Shop sells pens at 3 for 2 dollars. So price per pen = 2/3 dollars. 18 pens cost 18 * 2/3 = 12 dollars. Alternatively 18/3=6 groups, each 2 dollars => 12. Answer: 12.<|end_message|><|message_model|><|content_text|>12<|end_message|>",
+    "<|content_thinking|>The user wants to rewrite \"The meeting was postponed by the manager\" in the active voice.\n\nOriginal: The meeting was postponed by the manager.\n- Subject: The meeting\n- Verb: was postponed (passive)\n- Agent: by the manager\n\nActive voice: The manager postponed the meeting.\n\nThis is straightforward. I should provide the rewritten sentence clearly.<|end_message|><|message_model|><|content_text|>The manager postponed the meeting.<|end_message|>",
+    "<|content_thinking|>The user asks: \"Give the facts about Tokyo.\" The system instruction says: \"Answer with a JSON object with the keys city, country and population.\"\n\nSo I need to provide facts about Tokyo, but specifically format the answer as a JSON object with keys: city, country, population.\n\nI should include the relevant values:\n- city: Tokyo\n- country: Japan\n- population: Approximately 13.9 million (for Tokyo proper) or 37 million (for Greater Tokyo Area). Usually \"Tokyo\" as a city refers to the prefecture/capital, but the city proper is about 14 million. I should provide a clear figure. Let's use ~13.96 million (as of recent estimates) or just \"13.9 million\". To be safe and accurate, I can specify the metropolitan area, but the key is just population. Let's provide \"13.9 million\" for the city proper, or mention both? The instruction is strict: JSON object with those keys. So just those three.\n\nLet's construct:\n{\n  \"city\": \"Tokyo\",\n  \"country\": \"Japan\",\n  \"population\": \"13.9 million\"\n}\n\nThis satisfies. I will not add extra text outside JSON? The instruction says \"Answer with a JSON object...\". Usually that means the response should be just the JSON. I will provide just the JSON.<|end_message|><|message_model|><|content_text|><|content_text|>{\"city\": \"Tokyo\", \"country\": \"Japan\", \"population\": \"13.9 million\"}<|end_message|>",
+    "<|content_thinking|>The user asks about Paris.<|end_message|><|message_model|><|content_text|><|end_message|><|message_model|>get_weather<|content_invoke_tool_json|>{\"name\":\"get_weather\",\"args\":{\"city\":\"Paris\"}}<|end_message|>",
+    "<|content_thinking|>Short.<|end_message|><|message_model|><|content_text|>The answer is cut he",
+];
+
 /// Every subject with each of its outputs.
 fn corpus() -> impl Iterator<Item = (&'static Subject, &'static str)> {
     FORMATS
@@ -1962,9 +2142,15 @@ fn replay(
     )
 }
 
-/// Whether `text` is a JSON prefix the prefix parser takes whole.
-fn valid_json_prefix(text: &str) -> bool {
-    matches!(PartialJson::default().parse(text, true), Ok((_, consumed)) if consumed == text.len())
+/// Whether `text` is a prefix of JSON a strict reader accepts: whole, or cut where the reader asks
+/// for more bytes rather than refusing one it saw. The crate's partial parser is no oracle here: its
+/// prefix mode tolerates what JSON lacks (a trailing comma, a value left out, an escape JSON lacks),
+/// which is what a client's reader refuses once the call ends.
+fn strict_json_prefix(text: &str) -> bool {
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(_) => true,
+        Err(error) => error.is_eof(),
+    }
 }
 
 /// Whether `fragment`, appended to the arguments `so_far`, closes a JSON string `so_far` left
@@ -2004,6 +2190,9 @@ fn check_well_formed(name: &str, text: &str, cuts: &[usize], events: &[Event]) {
     let mut ended: Vec<u32> = Vec::new();
     let mut arguments: Vec<(u32, String)> = Vec::new();
     let mut malformed_inside: Vec<u32> = Vec::new();
+    // The calls whose arguments stopped being JSON, said by a `Malformed { InvalidArguments }`
+    // event of no bytes while the call was open: from there the fragments are the model's bytes.
+    let mut broke: Vec<u32> = Vec::new();
     let mut reasoning_open = false;
     let mut finished = false;
     for (at, event) in events.iter().enumerate() {
@@ -2028,11 +2217,11 @@ fn check_well_formed(name: &str, text: &str, cuts: &[usize], events: &[Event]) {
                 assert!(!ended.contains(index), "{}: after the call's end", place());
                 if let Some((_, so_far)) = arguments.iter_mut().find(|(i, _)| i == index) {
                     // A fragment that closes a string the arguments so far left open carries the
-                    // bytes that closed it, the model's closing tag or token: a closing quote with
-                    // no source is one no byte of the output accounts for, made up for a value the
-                    // model never closed.
+                    // bytes that closed it, the model's quote, closing tag or token: a closing
+                    // quote with no byte of the output behind it (none, or whitespace alone) is
+                    // one the reader made up for a value the model never closed.
                     assert!(
-                        !closes_an_open_string(so_far, json) || !source.text.is_empty(),
+                        !closes_an_open_string(so_far, json) || !source.text.trim().is_empty(),
                         "{}: the fragment {json:?} closes an open string with no byte of the output behind it, a made-up closing quote",
                         place()
                     );
@@ -2046,11 +2235,20 @@ fn check_well_formed(name: &str, text: &str, cuts: &[usize], events: &[Event]) {
                         place()
                     );
                     so_far.push_str(json);
-                    assert!(
-                        valid_json_prefix(so_far),
-                        "{}: the arguments so far, {so_far:?}, are no valid JSON prefix",
-                        place()
-                    );
+                    if broke.contains(index) {
+                        assert_eq!(
+                            json,
+                            &source.text,
+                            "{}: a fragment after the break is not the model's bytes as written",
+                            place()
+                        );
+                    } else {
+                        assert!(
+                            strict_json_prefix(so_far),
+                            "{}: the arguments so far, {so_far:?}, are no prefix of JSON a strict reader accepts",
+                            place()
+                        );
+                    }
                 }
             }
             Event::ToolCallEnd { index, .. } => {
@@ -2076,10 +2274,17 @@ fn check_well_formed(name: &str, text: &str, cuts: &[usize], events: &[Event]) {
                     );
                 }
             }
-            Event::Malformed { .. } => {
+            Event::Malformed { text, why } => {
                 for index in &started {
                     if !ended.contains(index) && !malformed_inside.contains(index) {
                         malformed_inside.push(*index);
+                    }
+                    if !ended.contains(index)
+                        && *why == MalformedReason::InvalidArguments
+                        && text.text.is_empty()
+                        && !broke.contains(index)
+                    {
+                        broke.push(*index);
                     }
                 }
             }

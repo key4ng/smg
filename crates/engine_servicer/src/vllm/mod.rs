@@ -129,6 +129,11 @@ pub struct VllmModelInfo {
     /// as the `mm_item_limits` label the Router's media pipeline holds
     /// requests to (`image=8,video=2`); empty when the engine has none.
     pub mm_item_limits: String,
+    /// The engine's encoder budget in feature tokens, as its own front end
+    /// derives it: the most one media item may carry and still be scheduled,
+    /// advertised as `mm_encoder_budget` so the Router's media pipeline
+    /// refuses a larger item before the engine; 0 when unknown.
+    pub mm_encoder_budget: i32,
     /// The scheduler's running window (`--max-num-seqs`) as the launcher read
     /// it: how many requests the engine runs at once, which `GetServerInfo`
     /// advertises as the bound the Router's PD admission gate claims decode
@@ -203,18 +208,22 @@ impl crate::kv_events::LoadSource for LoadFromState {
     fn load(&self, dp_rank: Option<i32>) -> Option<smg_grpc_client::common_proto::EngineLoad> {
         let state = self.0.upgrade()?;
         let response = info::loads(&state).ok()?;
-        let rank = dp_rank.unwrap_or(0);
-        let load = response
-            .loads
-            .iter()
-            .find(|load| load.dp_rank == rank)
-            .or_else(|| response.loads.first())?;
-        // The queued token-work is this servicer's estimate for the first
-        // rank (see `info::loads`); the other ranks do not report it.
-        let estimated = response.loads.first().map(|first| first.dp_rank) == Some(load.dp_rank);
+        let load = match dp_rank {
+            // A rank the report has no entry for (it has not reported a
+            // scheduler step while another rank has) gets no record rather
+            // than another rank's figures, as under the Python servicer.
+            Some(rank) => response.loads.iter().find(|load| load.dp_rank == rank)?,
+            None => response
+                .loads
+                .iter()
+                .find(|load| load.dp_rank == 0)
+                .or_else(|| response.loads.first())?,
+        };
+        // The queued token-work is this servicer's own estimate for the
+        // rank (see `info::loads`), so every rank's record reports it.
         let mut record = smg_grpc_client::common_proto::EngineLoad::from(load);
         record.waiting_uncached_tokens =
-            estimated.then(|| u32::try_from(load.num_waiting_uncached_tokens).unwrap_or(0));
+            Some(u32::try_from(load.num_waiting_uncached_tokens).unwrap_or(0));
         record.engine_silence_ms = state.engine.output_silence_ms();
         record.engine_reports_steps = state.engine.reports_steps();
         record.prefill_pending_tokens = state.engine.prefill_pending_tokens();
@@ -229,7 +238,7 @@ pub(super) struct State {
     pub(super) kv_relay: Option<Arc<crate::kv_events::KvEventRelay>>,
     pub(super) stats: Stats,
     /// Queued token-work, generation throughput and hit rate from the
-    /// requests this servicer forwards, for `GetLoads`.
+    /// requests this servicer forwards, per rank, for `GetLoads`.
     pub(super) loads: crate::load_tracker::LoadTracker,
     /// The local tokenizer directory the servicer loaded (`GetTokenizer`
     /// bundles it); `None` when none resolved.
@@ -324,10 +333,13 @@ impl VllmServicerServer {
                 "model_path must not be empty".to_string(),
             ));
         }
+        // One publisher per data-parallel rank: the launcher's width (the
+        // handshake's figure, which may differ, is not known yet).
         let kv_relay = crate::kv_events::KvEventRelay::for_publisher(
             &config.model.kv_events_endpoint,
             Some(&config.model.kv_events_replay_endpoint),
             &config.model.kv_events_topic,
+            u32::try_from(config.model.data_parallel_size).unwrap_or(1),
         );
         let state = Arc::new(State {
             tokenizer_dir: config.servicer.tokenizer_dir.clone(),

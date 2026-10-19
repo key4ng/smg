@@ -1,5 +1,3 @@
-use std::{future::Future, pin::Pin};
-
 use openai_protocol::{
     chat::ChatCompletionRequest, completion::CompletionRequest, generate::GenerateRequest,
     messages::CreateMessageRequest, responses::ResponsesRequest,
@@ -9,8 +7,11 @@ use tonic::{transport::Channel, Request};
 use tracing::{debug, warn};
 
 use crate::{
-    request_fields::{response_format_schema, stop_strings, PlainSampling},
-    AbortOnDropClient, BoxedTraceInjector,
+    request_fields::{
+        completion_constraint, plain_constraint, response_format_schema, stop_strings,
+        ConstraintKind, PlainSampling,
+    },
+    BoxedTraceInjector,
 };
 
 // Include the generated protobuf code
@@ -40,51 +41,14 @@ pub struct SglangGenerateRequestOptions {
     pub require_reasoning: bool,
 }
 
-impl AbortOnDropClient for SglangSchedulerClient {
-    fn abort_for_drop(
-        self,
-        request_id: String,
-    ) -> Pin<Box<dyn Future<Output = Result<(), tonic::Status>> + Send>> {
-        Box::pin(async move {
-            self.abort_request(request_id, "Stream dropped".to_string())
-                .await
-        })
-    }
-}
+crate::impl_abort_for_drop_with_reason!(SglangSchedulerClient);
 
 impl SglangSchedulerClient {
     crate::impl_engine_client_basics!(
+        proto,
         proto::sglang_scheduler_client::SglangSchedulerClient<Channel>,
         "SGLang scheduler"
     );
-
-    /// Submit a generation request (returns auto-aborting streaming response)
-    ///
-    /// The returned stream automatically sends an abort request when dropped,
-    /// ensuring proper cleanup even if the HTTP client disconnects or an error occurs.
-    /// Call `mark_completed()` on the stream after successful completion to prevent
-    /// unnecessary abort RPCs.
-    pub async fn generate(
-        &self,
-        req: proto::GenerateRequest,
-    ) -> Result<AbortOnDropStream, tonic::Status> {
-        let request_id = req.request_id.clone();
-        let mut client = self.client.clone();
-        let mut request = Request::new(req);
-
-        // Inject W3C trace context into gRPC metadata for distributed tracing
-        if let Err(e) = self.trace_injector.inject(request.metadata_mut()) {
-            warn!("Failed to inject trace context: {}", e);
-        }
-
-        let response = client.generate(request).await?;
-
-        Ok(AbortOnDropStream::new(
-            response.into_inner(),
-            request_id,
-            self.clone(),
-        ))
-    }
 
     /// Submit an embedding request
     pub async fn embed(
@@ -644,7 +608,7 @@ impl SglangSchedulerClient {
     ) -> Result<proto::SamplingParams, String> {
         let stop_sequences = stop_strings(request.stop.as_ref());
 
-        let constraint = Self::build_single_constraint_from_completion(request)?;
+        let constraint = Self::constraint_of(completion_constraint(request)?);
 
         Ok(proto::SamplingParams {
             temperature: request.temperature.unwrap_or(1.0),
@@ -668,54 +632,15 @@ impl SglangSchedulerClient {
         })
     }
 
-    fn build_single_constraint_from_completion(
-        request: &CompletionRequest,
-    ) -> Result<Option<proto::sampling_params::Constraint>, String> {
-        let mut constraints = Vec::new();
-        if let Some(json_schema) = &request.json_schema {
-            constraints.push(proto::sampling_params::Constraint::JsonSchema(
-                json_schema.clone(),
-            ));
-        }
-        if let Some(regex) = &request.regex {
-            constraints.push(proto::sampling_params::Constraint::Regex(regex.clone()));
-        }
-        if let Some(ebnf) = &request.ebnf {
-            constraints.push(proto::sampling_params::Constraint::EbnfGrammar(
-                ebnf.clone(),
-            ));
-        }
-
-        match constraints.len() {
-            0 => Ok(None),
-            1 => Ok(constraints.pop()),
-            _ => Err("Multiple structured constraints are not allowed".to_string()),
-        }
-    }
-
-    fn build_single_constraint_from_plain(
-        params: &GenerateSamplingParams,
-    ) -> Result<Option<proto::sampling_params::Constraint>, String> {
-        let mut constraints = Vec::new();
-        if let Some(json_schema) = &params.json_schema {
-            constraints.push(proto::sampling_params::Constraint::JsonSchema(
-                json_schema.clone(),
-            ));
-        }
-        if let Some(regex) = &params.regex {
-            constraints.push(proto::sampling_params::Constraint::Regex(regex.clone()));
-        }
-        if let Some(ebnf) = &params.ebnf {
-            constraints.push(proto::sampling_params::Constraint::EbnfGrammar(
-                ebnf.clone(),
-            ));
-        }
-
-        match constraints.len() {
-            0 => Ok(None),
-            1 => Ok(constraints.pop()),
-            _ => Err("Multiple structured constraints are not allowed".to_string()),
-        }
+    /// The engine's variant for the structured constraint a request names.
+    fn constraint_of(
+        constraint: Option<(ConstraintKind, String)>,
+    ) -> Option<proto::sampling_params::Constraint> {
+        constraint.map(|(kind, value)| match kind {
+            ConstraintKind::JsonSchema => proto::sampling_params::Constraint::JsonSchema(value),
+            ConstraintKind::Regex => proto::sampling_params::Constraint::Regex(value),
+            ConstraintKind::Ebnf => proto::sampling_params::Constraint::EbnfGrammar(value),
+        })
     }
 
     fn build_sampling_params_from_plain(
@@ -740,7 +665,7 @@ impl SglangSchedulerClient {
             n: plain.n,
             min_new_tokens: plain.min_new_tokens.unwrap_or(0),
             constraint: match params {
-                Some(p) => Self::build_single_constraint_from_plain(p)?,
+                Some(p) => Self::constraint_of(plain_constraint(p)?),
                 None => None,
             },
             ..Default::default()
@@ -1188,4 +1113,30 @@ mod tests {
     }
 
     // TODO: ModelInfo not in current proto - skip test
+
+    /// Each constraint kind reaches the engine as its own variant; none stays none.
+    #[test]
+    fn constraint_of_maps_each_kind_to_the_engines_variant() {
+        use crate::request_fields::ConstraintKind;
+        for (kind, expected) in [
+            (
+                ConstraintKind::JsonSchema,
+                proto::sampling_params::Constraint::JsonSchema("v".to_string()),
+            ),
+            (
+                ConstraintKind::Regex,
+                proto::sampling_params::Constraint::Regex("v".to_string()),
+            ),
+            (
+                ConstraintKind::Ebnf,
+                proto::sampling_params::Constraint::EbnfGrammar("v".to_string()),
+            ),
+        ] {
+            assert_eq!(
+                SglangSchedulerClient::constraint_of(Some((kind, "v".to_string()))),
+                Some(expected)
+            );
+        }
+        assert_eq!(SglangSchedulerClient::constraint_of(None), None);
+    }
 }

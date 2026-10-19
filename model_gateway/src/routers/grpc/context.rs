@@ -136,8 +136,8 @@ impl RequestType {
 
     /// Parallel samples the request asks for: 1 when unset, or when the
     /// surface has no such parameter. With more than one, a disaggregated
-    /// decode leg recomputes the prompt locally instead of pulling the
-    /// prefill leg's KV.
+    /// decode side recomputes the prompt locally instead of pulling the
+    /// prefill side's KV.
     pub fn sampling_n(&self) -> u32 {
         match self {
             Self::Chat(r) => r.choices(),
@@ -291,7 +291,7 @@ pub(crate) struct ProcessingState {
     pub clients: Option<ClientSelection>,
 
     /// Prefill admission slot, taken during PD/EPD worker selection and
-    /// handed to the dispatch that runs the Prefill leg.
+    /// handed to the dispatch that runs the Prefill side.
     pub pd_prefill_guard: Option<PrefillLoadGuard>,
 
     // Response processing state seeded during ingress (stop decoder, router
@@ -314,12 +314,12 @@ pub(crate) struct RoutingSnapshot {
     pub cache_namespace: Option<CacheNamespace>,
     /// The request carries pixel media (an image or a video), noted at first
     /// selection: a retry keeps the workers that take it (regular mode's
-    /// single worker; the prefill leg of prefill/decode mode, see worker
-    /// selection's `prefill_leg_needs_vision`) on ones with a vision encoder,
+    /// single worker; the prefill side of prefill/decode mode, see worker
+    /// selection's `prefill_side_needs_vision`) on ones with a vision encoder,
     /// as the first attempt did.
     pub needs_vision: bool,
-    /// The request's disaggregated decode leg needs a worker with a vision
-    /// encoder (worker selection's `decode_leg_needs_vision`: prefill/decode
+    /// The request's disaggregated decode side needs a worker with a vision
+    /// encoder (worker selection's `decode_side_needs_vision`: prefill/decode
     /// mode only), noted at first selection so a retry re-selects under the
     /// same demand.
     pub decode_needs_vision: bool,
@@ -336,7 +336,7 @@ impl WireConstraint {
                 requires_media_refs,
                 pipeline,
             },
-            // Disaggregated legs are gRPC-only.
+            // Disaggregated workers are gRPC-only.
             WorkerSelection::Disaggregated { runtime_type, .. } => Self {
                 runtime: *runtime_type,
                 connection: ConnectionMode::Grpc,
@@ -389,7 +389,7 @@ pub(crate) struct DispatchContext {
     pub sticky_key: Option<String>,
     pub clients: Option<ClientSelection>,
     /// Consumed by the first dispatch; retries re-dispatch only the
-    /// prefill/decode legs against the already-running encode jobs.
+    /// prefill/decode sides against the already-running encode jobs.
     pub encode_outputs: Option<EncodeOutputs>,
     pub multimodal_inflight: Option<InflightPermit>,
     pub dispatch: Option<DispatchMetadata>,
@@ -828,7 +828,7 @@ pub(crate) enum LoadGuards {
     Single {
         _guard: WorkerLoadGuard,
     },
-    /// Disaggregated guards cover the decode leg only. The Prefill load is
+    /// Disaggregated guards cover the decode side only. The Prefill load is
     /// a `PrefillLoadGuard` that drops when the Prefill phase ends.
     Disaggregated {
         _decode: WorkerLoadGuard,
@@ -841,7 +841,7 @@ pub(crate) enum LoadGuards {
     /// A disaggregated dispatch whose bootstrap rooms the PD admission gate
     /// claimed before it was allowed to send. The claim rides with the guards
     /// so it is released on every path the dispatch can end on — an early
-    /// error, a failed leg, a client disconnect, a retry, or completion.
+    /// error, a failed side, a client disconnect, a retry, or completion.
     Admitted {
         _admission: PdAdmissionGuard,
         _guards: Box<LoadGuards>,
@@ -1331,7 +1331,7 @@ impl WorkerSelection {
     }
 
     /// The workers this selection dispatches to: the one worker, or the
-    /// prefill and decode legs.
+    /// prefill and decode sides.
     pub fn workers(&self) -> impl Iterator<Item = &Arc<dyn Worker>> {
         let (first, second) = match self {
             Self::Single { worker } => (worker, None),
@@ -1343,7 +1343,7 @@ impl WorkerSelection {
     }
 
     /// The engines (base URLs) this selection dispatches to: the one worker,
-    /// or the prefill and decode legs.
+    /// or the prefill and decode sides.
     pub fn engines(&self) -> impl Iterator<Item = &str> {
         self.workers().map(|worker| worker.base_url())
     }
@@ -1357,7 +1357,7 @@ impl WorkerSelection {
                 prefill, decode, ..
             } => {
                 // EPD encode dispatch is asynchronous and supervised by
-                // RequestExecution; this records only the prefill/decode leg.
+                // RequestExecution; this records only the prefill/decode side.
                 ledger.record_outcome(prefill.as_ref(), status_code);
                 ledger.record_outcome(decode.as_ref(), status_code);
             }
@@ -1483,6 +1483,40 @@ impl ClientSelection {
         }
     }
 
+    /// The single engine's client for an executor of single dispatches, or
+    /// the client-shape mismatch answer, logged under `function`. Client
+    /// acquisition shapes the selection after the worker selection the plan
+    /// kind comes from, so no executor meets the mismatch; the answer says
+    /// so if one ever does.
+    pub fn single_or_mismatch(
+        &mut self,
+        function: &'static str,
+    ) -> Result<&mut BackendClient, axum::response::Response> {
+        self.single_mut().ok_or_else(|| {
+            error!(function, "Expected single client but got disaggregated");
+            internal_error(
+                "expected_single_client_got_disaggregated",
+                "Expected single client but got disaggregated",
+            )
+        })
+    }
+
+    /// The prefill and decode clients for an executor of disaggregated
+    /// dispatches, or the client-shape mismatch answer, logged under
+    /// `function` (see [`Self::single_or_mismatch`]).
+    pub fn disaggregated_or_mismatch(
+        &mut self,
+        function: &'static str,
+    ) -> Result<(&mut BackendClient, &mut BackendClient), axum::response::Response> {
+        self.disaggregated_mut().ok_or_else(|| {
+            error!(function, "Expected disaggregated clients but got single");
+            internal_error(
+                "expected_disaggregated_clients_got_single",
+                "Expected disaggregated clients but got single",
+            )
+        })
+    }
+
     pub fn prefill_client(&self) -> Option<&BackendClient> {
         match self {
             Self::Disaggregated { prefill, .. } => Some(prefill),
@@ -1490,21 +1524,7 @@ impl ClientSelection {
         }
     }
 
-    pub fn prefill_client_mut(&mut self) -> Option<&mut BackendClient> {
-        match self {
-            Self::Disaggregated { prefill, .. } => Some(prefill),
-            Self::Single { .. } => None,
-        }
-    }
-
     pub fn decode_client(&self) -> Option<&BackendClient> {
-        match self {
-            Self::Disaggregated { decode, .. } => Some(decode),
-            Self::Single { .. } => None,
-        }
-    }
-
-    pub fn decode_client_mut(&mut self) -> Option<&mut BackendClient> {
         match self {
             Self::Disaggregated { decode, .. } => Some(decode),
             Self::Single { .. } => None,
@@ -1522,7 +1542,7 @@ pub(crate) enum ExecutionResult {
         prefill: ProtoStream,
         decode: Box<ProtoStream>,
         /// Guards indexed by fan-out sample. Each starts as `Some` and is taken
-        /// when that sample completes; siblings retain their guards. A leg
+        /// when that sample completes; siblings retain their guards. A side
         /// whose prefill already ran to completion in the execution stage
         /// (sequential PD) carries `None` — there is no live guard to release.
         prefill_guards: Vec<Option<PrefillLoadGuard>>,
@@ -1553,7 +1573,7 @@ pub(crate) struct PdTiming {
     pub prefill_start: Instant,
     /// Monotonic instant the decode RPC was dispatched. Sequential dispatch
     /// sends decode once prefill is drained and relayed; parallel dispatch
-    /// sends both legs together, so this is the prefill instant.
+    /// sends both sides together, so this is the prefill instant.
     pub decode_sent: Instant,
     /// Backend runtime label (e.g. "sglang", "vllm") for the PD metric set.
     pub runtime: &'static str,
@@ -1606,7 +1626,10 @@ pub(crate) enum FinalResponse {
 
 #[cfg(test)]
 mod tests {
+    use smg_grpc_client::VllmEngineClient;
+
     use super::*;
+    use crate::routers::grpc::{client::GrpcClient, test_engine::mock_engine};
 
     /// The status of a failure a stage reports and the code of its JSON
     /// error object.
@@ -1937,7 +1960,7 @@ mod tests {
     }
 
     #[test]
-    fn load_guards_report_completion_for_each_leg_they_hold() {
+    fn load_guards_report_completion_for_each_side_they_hold() {
         use crate::worker::{BasicWorkerBuilder, RequestCompletionSink, WorkerType};
         #[derive(Debug, Default)]
         struct CompletionSpy(std::sync::Mutex<Vec<String>>);
@@ -1977,8 +2000,8 @@ mod tests {
         ));
         assert_eq!(spy.0.lock().unwrap().as_slice(), ["grpc://single"]);
 
-        // The disaggregated path: the decode leg completes with the guards,
-        // the prefill leg with its own guard when the prefill phase ends.
+        // The disaggregated path: the decode side completes with the guards,
+        // the prefill side with its own guard when the prefill phase ends.
         let guards = LoadGuards::new(&pd_selection(&prefill, &decode), None);
         let prefill_guard = PrefillLoadGuard::Unbounded {
             _guard: WorkerLoadGuard::new(Arc::clone(&prefill), None),
@@ -2004,5 +2027,43 @@ mod tests {
             3,
         ));
         assert_eq!(spy.0.lock().unwrap().len(), before + 3);
+    }
+
+    /// The client-shape mismatch answers an executor takes from the
+    /// selection: one status and code per shape, whichever executor asks;
+    /// a selection of the asked shape hands its clients out.
+    #[tokio::test]
+    async fn a_selection_of_the_other_shape_answers_the_mismatch() {
+        let (url, server) = mock_engine("test-model").await;
+        let client = VllmEngineClient::connect(&url)
+            .await
+            .expect("connect mock engine");
+        let client = BackendClient::Grpc(GrpcClient::Vllm(client));
+        let mut single = ClientSelection::Single {
+            client: client.clone(),
+        };
+        assert!(single.single_or_mismatch("an_executor").is_ok());
+        assert_eq!(
+            failure_shape(failure_of(single.disaggregated_or_mismatch("an_executor"))).await,
+            (
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                "expected_disaggregated_clients_got_single".to_owned()
+            )
+        );
+        let mut disaggregated = ClientSelection::Disaggregated {
+            prefill: client.clone(),
+            decode: client,
+        };
+        assert!(disaggregated
+            .disaggregated_or_mismatch("an_executor")
+            .is_ok());
+        assert_eq!(
+            failure_shape(failure_of(disaggregated.single_or_mismatch("an_executor"))).await,
+            (
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                "expected_single_client_got_disaggregated".to_owned()
+            )
+        );
+        server.abort();
     }
 }

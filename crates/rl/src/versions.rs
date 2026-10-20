@@ -8,7 +8,7 @@ use std::{
     sync::{Mutex, PoisonError},
 };
 
-use openai_protocol::rl::RlCallOutcome;
+use openai_protocol::{rl::RlCallOutcome, worker::WorkerStatus};
 use serde_json::Value;
 
 use crate::view::RlWorkerInfo;
@@ -49,7 +49,9 @@ pub(crate) struct ReportedVersions(Mutex<HashMap<String, (String, u64, u64)>>);
 
 impl ReportedVersions {
     /// Record `version` for every rank in `registered`, the snapshot taken
-    /// before the calls, of an engine one of the `refitted` workers serves.
+    /// before the calls, of an engine one of the `refitted` workers serves,
+    /// that was ready then: `downs` moves only on leaving ready, so it would
+    /// miss a rank that was pending or not ready and restarted.
     /// `current` is the registry after the calls: entries of workers no longer
     /// in it are dropped, and a worker registered meanwhile keeps the version
     /// its own refit recorded.
@@ -64,7 +66,10 @@ impl ReportedVersions {
         let ids: HashSet<&str> = current.iter().map(|w| w.id.as_str()).collect();
         let mut versions = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         versions.retain(|id, _| ids.contains(id.as_str()));
-        for w in registered.iter().filter(|w| ids.contains(w.id.as_str())) {
+        let recordable = registered
+            .iter()
+            .filter(|w| w.status == WorkerStatus::Ready && ids.contains(w.id.as_str()));
+        for w in recordable {
             if engines.contains(w.base_url.as_str()) {
                 versions.insert(w.id.clone(), (version.to_string(), w.downs, w.revision));
             }

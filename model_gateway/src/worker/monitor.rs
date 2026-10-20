@@ -222,7 +222,7 @@ enum NativeLoads {
     /// Nothing was learned about the endpoint — retry on the next tick.
     Inconclusive,
     /// The endpoint is there and its handler fails (500) — retry after a
-    /// back-off where the gauges can serve the load meanwhile.
+    /// back-off.
     ServerError,
 }
 
@@ -1089,7 +1089,6 @@ impl WorkerMonitor {
         let now = Instant::now();
 
         let mut native = None;
-        let mut failing = Vec::new();
         for path in known.candidates(now) {
             match Self::probe_native_loads(worker, path).await {
                 NativeLoads::Available(load) => {
@@ -1098,7 +1097,7 @@ impl WorkerMonitor {
                     break;
                 }
                 NativeLoads::Absent => memo.record_absent(path),
-                NativeLoads::ServerError => failing.push(path),
+                NativeLoads::ServerError => memo.record_server_error(path, now),
                 NativeLoads::Inconclusive => memo.end_streak(path),
             }
         }
@@ -1116,15 +1115,6 @@ impl WorkerMonitor {
                 _ => None,
             },
         };
-        // Backing off pays only while the gauges serve the load; where they
-        // cannot, the failing route is the only source and stays asked.
-        for path in failing {
-            if response.is_some() {
-                memo.record_server_error(path, now);
-            } else {
-                memo.end_streak(path);
-            }
-        }
         // Write back only what a probe actually settled, so a tick that
         // learned nothing leaves the memo alone and retries next time.
         if let Some(store) = native_loads_memo {
@@ -3447,9 +3437,10 @@ sglang:token_usage{model_name="llama"} 0.5
     }
 
     #[tokio::test]
-    async fn an_sglang_worker_with_its_gauges_off_keeps_asking_its_route() {
-        // SGLang serves `/metrics` only with `--enable-metrics`; without its
-        // gauges, the native route is the worker's only load source.
+    async fn an_sglang_worker_with_its_gauges_off_backs_off_too() {
+        // SGLang serves `/metrics` only with `--enable-metrics`. Without its
+        // gauges the worker has no load while the route fails either way;
+        // the back-off only spaces the probes.
         let stub = spawn_engine(StatusCode::INTERNAL_SERVER_ERROR, "").await;
         let worker = worker_with_runtime(&stub.url, RuntimeType::Sglang);
         let memo = DashMap::new();
@@ -3460,11 +3451,11 @@ sglang:token_usage{model_name="llama"} 0.5
                 .is_none());
         }
 
-        assert_eq!(stub.probes.load(Ordering::SeqCst), 3);
+        assert_eq!(stub.probes.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn a_worker_with_no_gauge_fallback_keeps_asking_its_only_route() {
+    async fn a_worker_with_no_gauge_fallback_backs_off_too() {
         let stub = spawn_engine(StatusCode::INTERNAL_SERVER_ERROR, "").await;
         let worker = worker_with_runtime(&stub.url, RuntimeType::TokenSpeed);
         let memo = DashMap::new();
@@ -3475,11 +3466,7 @@ sglang:token_usage{model_name="llama"} 0.5
                 .is_none());
         }
 
-        assert_eq!(
-            stub.probes.load(Ordering::SeqCst),
-            3,
-            "backing off would leave the worker with no load at all"
-        );
+        assert_eq!(stub.probes.load(Ordering::SeqCst), 1);
     }
 
     fn engine_route_due(memo: NativeLoadsMemo, at: Instant) -> bool {

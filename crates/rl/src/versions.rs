@@ -95,7 +95,7 @@ mod tests {
         Router,
     };
     use http_body_util::BodyExt;
-    use openai_protocol::worker::RuntimeType;
+    use openai_protocol::worker::{RuntimeType, WorkerStatus};
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
@@ -258,6 +258,27 @@ mod tests {
         assert_eq!((first_status, second_status), (StatusCode::OK, StatusCode::OK));
         assert_eq!(reported(&app, "w1").await, "7");
         assert_eq!(reported(&app, "w2").await, "8");
+    }
+
+    #[tokio::test]
+    async fn a_worker_refitted_while_not_ready_reports_its_registration_metadata() {
+        let e = FakeEngine::start(StatusCode::OK, json!({"success": true}), 0).await;
+        for status in [WorkerStatus::Pending, WorkerStatus::NotReady] {
+            let mut w = worker("w1", &e.url, RuntimeType::Sglang);
+            w.status = status;
+            let app = app(SwapView::new(vec![w]));
+
+            let (code, _) = send(
+                &app,
+                "POST",
+                "/workers/w1/engine/update_weights_from_disk",
+                Some(json!({"model_path": "/m", "weight_version": "7"})),
+            )
+            .await;
+
+            assert_eq!(code, StatusCode::OK, "{status:?}");
+            assert_eq!(reported(&app, "w1").await, "default", "{status:?}");
+        }
     }
 
     #[tokio::test]

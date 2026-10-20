@@ -1,6 +1,6 @@
 # smg-grpc-servicer
 
-gRPC servicer implementations for LLM inference engines. Supports vLLM, MLX, TokenSpeed, and SGLang.
+gRPC servicer implementations for LLM inference engines. Supports vLLM, MLX, TokenSpeed, SGLang, and DeepInfer.
 
 ## Installation
 
@@ -26,6 +26,12 @@ For SGLang:
 
 ```bash
 pip install smg-grpc-servicer[sglang]
+```
+
+For DeepInfer, build and install [DeepInfer](https://github.com/deepseek-ai/DeepInfer) from source first, then:
+
+```bash
+pip install smg-grpc-servicer[deepinfer]
 ```
 
 ## Usage
@@ -486,6 +492,40 @@ livenessProbe:
 python -m smg_grpc_servicer.mlx --model meta-llama/Llama-2-7b-hf --host 0.0.0.0 --port 50051
 ```
 
+### DeepInfer
+
+DeepInfer ships an in-process engine and no server of its own; this servicer
+runs its step loop and serves the `DeepInferEngine` proto. As vLLM splits its
+`AsyncLLM` frontend from its `EngineCoreProc`, each DP rank runs as two
+processes: an engine core that owns the GPUs and runs the step loop, and a
+gRPC frontend (no torch, no DeepInfer) that talks to it over local ZMQ IPC, so
+request handling never competes with the step loop. DeepInfer's DP ranks step
+in lockstep, and DP rank `r` is served on `--port + r`; if any process exits,
+the launcher stops them all. Register every rank with the gateway as its own
+worker:
+
+```bash
+# 4 GPUs, DP=4 with expert parallelism across them (ports 50051-50054)
+python -m smg_grpc_servicer.deepinfer --model deepseek-ai/DeepSeek-V4.1-Flash-1017 \
+    --data-parallel-size 4 --expert-parallel-size 4 --max-model-len 32768 \
+    --host 0.0.0.0 --port 50051
+
+smg launch --worker-urls grpc://127.0.0.1:50051 grpc://127.0.0.1:50052 \
+    grpc://127.0.0.1:50053 grpc://127.0.0.1:50054
+```
+
+DeepInfer's feature switches (`DEEPINFER_USE_NEXTN_DECODE`, ...) are environment
+variables and pass through. Multi-node runs split the ranks by `--node-rank` /
+`--nnodes` (default: `RANK` / `WORLD_SIZE`), with `MASTER_ADDR` / `MASTER_PORT`
+for DeepInfer's rendezvous.
+
+DeepInfer's sampler implements temperature, top-p, top-k, a seed, top logprobs
+and JSON-schema / regex / EBNF constraints, and the servicer adds stop token
+ids. The gateway refuses what it lacks with a 400: stop strings, `n > 1`,
+`min_p`, `min_tokens`, frequency / presence / repetition penalties, logit
+bias, and `structural_tag` tool constraints. Images, embeddings, PD
+disaggregation and KV events are not wired up yet.
+
 ### TokenSpeed
 
 ```bash
@@ -775,12 +815,13 @@ smg-grpc-servicer[vllm]    ──optional dep──>  vllm       (lazy import)
 smg-grpc-servicer[mlx]     ──optional dep──>  mlx-lm     (lazy import)
 smg-grpc-servicer          ──external runtime──>  tokenspeed (lazy import)
 smg-grpc-servicer[sglang]  ──optional dep──>  sglang     (lazy import)
+smg-grpc-servicer[deepinfer] ──external runtime──>  deepinfer (lazy import)
 smg-grpc-servicer          ──depends on────>  smg-grpc-proto  (hard dependency)
 vllm                       ──optional──────>  smg-grpc-servicer (via vllm serve --grpc)
 sglang                     ──optional──────>  smg-grpc-servicer (via --grpc-mode)
 ```
 
-Backend dependencies are isolated via extras or runtime installs to avoid conflicts between vLLM, MLX, TokenSpeed, and SGLang.
+Backend dependencies are isolated via extras or runtime installs to avoid conflicts between vLLM, MLX, TokenSpeed, SGLang, and DeepInfer.
 
 ## Development
 

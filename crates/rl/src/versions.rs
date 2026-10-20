@@ -225,6 +225,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_worker_registered_during_a_refit_keeps_the_version_its_own_refit_stamped() {
+        let slow = FakeEngine::start(StatusCode::OK, json!({"success": true}), 300).await;
+        let fast = FakeEngine::start(StatusCode::OK, json!({"success": true}), 0).await;
+        let first = worker("w1", &slow.url, RuntimeType::Sglang);
+        let view = SwapView::new(vec![first.clone()]);
+        let app = app(Arc::clone(&view));
+
+        let refit = send(
+            &app,
+            "POST",
+            "/workers/w1/engine/update_weights_from_disk",
+            Some(json!({"model_path": "/m", "weight_version": "7"})),
+        );
+        let joiner = async {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            view.replace(vec![first, worker("w2", &fast.url, RuntimeType::Sglang)]);
+            send(
+                &app,
+                "POST",
+                "/workers/w2/engine/update_weights_from_disk",
+                Some(json!({"model_path": "/m", "weight_version": "8"})),
+            )
+            .await
+        };
+        let ((first_status, _), (second_status, _)) = tokio::join!(refit, joiner);
+
+        assert_eq!((first_status, second_status), (StatusCode::OK, StatusCode::OK));
+        assert_eq!(reported(&app, "w1").await, "7");
+        assert_eq!(reported(&app, "w2").await, "8");
+    }
+
+    #[tokio::test]
     async fn a_refit_through_the_fanout_is_what_discovery_reports() {
         let e1 = FakeEngine::start(StatusCode::OK, json!({"success": true}), 0).await;
         let e2 = FakeEngine::start(StatusCode::OK, json!({"success": true}), 0).await;

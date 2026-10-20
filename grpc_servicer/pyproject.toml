@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "smg-grpc-servicer"
 version = "0.14.0"
-description = "SMG gRPC servicer implementations for LLM inference engines (vLLM, MLX, TokenSpeed, SGLang)"
+description = "SMG gRPC servicer implementations for LLM inference engines (vLLM, MLX, TokenSpeed, SGLang, DeepInfer)"
 requires-python = ">=3.10"
 dependencies = [
     "smg-grpc-proto>=0.4.27",  # constrained_decoding and mm_item_limits on the worker handshake
@@ -57,6 +57,9 @@ mlx = ["smg-grpc-proto>=0.4.7", "mlx>=0.22.0", "mlx-lm>=0.22.0,<0.32", "transfor
 # TokenSpeed itself is installed from source (no PyPI release); these are the
 # extra runtime deps the KV-event bridge needs on top of a TokenSpeed install.
 tokenspeed = ["pyzmq>=25.0.0", "msgspec>=0.18.0"]
+# DeepInfer itself is installed from source (no PyPI release). 0.4.28 is the
+# first smg-grpc-proto that ships deepinfer_engine_pb2.
+deepinfer = ["smg-grpc-proto>=0.4.28", "numpy", "pyzmq>=25.0.0"]
 
 # SGLang loads this in every scheduler process; it hooks the scheduler behind
 # SMG over ZMQ only when the headless launcher's env is set (see

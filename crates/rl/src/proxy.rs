@@ -25,7 +25,7 @@ use crate::{
     metrics::{op_label, record_control_call},
     path::{passthrough_query, validate_engine_path},
     state::RlState,
-    versions::{names_a_version, stamped_by},
+    versions::{applied, stamped_version},
     view::{RlWorkerInfo, RlWorkerView},
 };
 
@@ -268,11 +268,12 @@ pub(crate) async fn proxy_handler(
     let Some(worker) = state.get(&id) else {
         return RlError::WorkerNotFound(id).into_response();
     };
-    let before = names_a_version(&req).then(|| state.view.list());
+    let version = stamped_version(&req.path, &req.body);
+    let before = version.is_some().then(|| state.view.list());
     match call_worker(&state, &worker, &req).await {
         Ok(outcome) => {
-            if let (Some(registered), Some(version)) = (before, stamped_by(&req, &outcome)) {
-                state.versions.record(&registered, &[(&worker, version)]);
+            if let Some((version, registered)) = version.zip(before).filter(|_| applied(&outcome)) {
+                state.versions.record(&registered, &[&worker], &version);
             }
             let status = StatusCode::from_u16(outcome.status).unwrap_or(StatusCode::BAD_GATEWAY);
             (status, Json(outcome)).into_response()

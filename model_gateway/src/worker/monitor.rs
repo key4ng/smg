@@ -221,6 +221,8 @@ enum NativeLoads {
     Absent,
     /// Nothing was learned about the endpoint — retry on the next tick.
     Inconclusive,
+    /// The endpoint is there and failing (5xx) — retry after a back-off.
+    ServerError,
 }
 
 /// A route that answers with the native load schema.
@@ -267,6 +269,18 @@ impl NativeLoadsPath {
     }
 }
 
+/// The most ticks a route that keeps answering 5xx is skipped for: about
+/// 70 s at the default interval, the longest a recovered engine waits to be
+/// read natively again.
+const MAX_SERVER_ERROR_SKIP: u32 = 7;
+
+/// Consecutive 5xx answers from one route, and the ticks left to skip it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ServerErrors {
+    streak: u32,
+    skip: u32,
+}
+
 /// What a worker's probes have established about its native load routes.
 ///
 /// Absence is tracked per route, not per worker: a 404 on one route is a
@@ -274,15 +288,20 @@ impl NativeLoadsPath {
 /// single "answered nothing" flag would discard the 404 whenever the other
 /// route was merely inconclusive, and the dead route would be re-asked on
 /// every tick forever.
+///
+/// A 5xx is not absence, so it is never memoized as such; a route that keeps
+/// failing is skipped for a doubling number of ticks instead (lab #9).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct NativeLoadsMemo {
     answered: Option<NativeLoadsPath>,
     absent: [bool; NativeLoadsPath::DISCOVERY.len()],
+    failing: [ServerErrors; NativeLoadsPath::DISCOVERY.len()],
 }
 
 impl NativeLoadsMemo {
     /// Routes worth probing this tick, in discovery order: the route that
-    /// answered last if there is one, else everything not known absent.
+    /// answered last if there is one, else everything not known absent;
+    /// either way, none that is backing off.
     fn candidates(self) -> impl Iterator<Item = NativeLoadsPath> {
         NativeLoadsPath::DISCOVERY
             .into_iter()
@@ -290,18 +309,38 @@ impl NativeLoadsMemo {
                 Some(answered) => path == answered,
                 None => !self.absent[path.index()],
             })
+            .filter(move |&path| self.failing[path.index()].skip == 0)
+    }
+
+    /// One tick passes for every route that is backing off.
+    fn pass_tick(&mut self) {
+        for errors in &mut self.failing {
+            errors.skip = errors.skip.saturating_sub(1);
+        }
     }
 
     fn record_answered(&mut self, path: NativeLoadsPath) {
         self.answered = Some(path);
         self.absent[path.index()] = false;
+        self.failing[path.index()] = ServerErrors::default();
     }
 
     fn record_absent(&mut self, path: NativeLoadsPath) {
         self.absent[path.index()] = true;
+        self.failing[path.index()] = ServerErrors::default();
         if self.answered == Some(path) {
             self.answered = None;
         }
+    }
+
+    /// The k-th 5xx in a row skips the route for `2^k - 1` ticks, capped.
+    fn record_server_error(&mut self, path: NativeLoadsPath) {
+        let errors = &mut self.failing[path.index()];
+        errors.streak = errors.streak.saturating_add(1);
+        errors.skip = 2u32
+            .saturating_pow(errors.streak)
+            .saturating_sub(1)
+            .min(MAX_SERVER_ERROR_SKIP);
     }
 
     #[cfg(test)]
@@ -1038,6 +1077,7 @@ impl WorkerMonitor {
             .and_then(|store| store.get(worker.url()).map(|hit| *hit))
             .unwrap_or_default();
         let mut memo = known;
+        memo.pass_tick();
 
         let mut response = None;
         for path in known.candidates() {
@@ -1048,11 +1088,12 @@ impl WorkerMonitor {
                     break;
                 }
                 NativeLoads::Absent => memo.record_absent(path),
+                NativeLoads::ServerError => memo.record_server_error(path),
                 NativeLoads::Inconclusive => {}
             }
         }
-        // Write back only what a probe actually settled, so a tick that
-        // learned nothing leaves the memo alone and retries next time.
+        // Write back only what changed, so a tick that learned nothing and
+        // has no back-off to count down leaves the memo alone.
         if let Some(store) = native_loads_memo {
             if memo != known {
                 store.insert(worker.url().to_string(), memo);
@@ -1093,8 +1134,11 @@ impl WorkerMonitor {
         ) {
             return NativeLoads::Absent;
         }
+        if status.is_server_error() {
+            return NativeLoads::ServerError;
+        }
         if !status.is_success() {
-            // 5xx and auth failures are conditions, not routing facts.
+            // Auth failures are conditions, not routing facts.
             return NativeLoads::Inconclusive;
         }
 
@@ -3298,8 +3342,103 @@ mod native_loads_tests {
         let hit = memo.get(worker.url()).map(|hit| *hit).expect("memo entry");
         assert!(!hit.is_absent(NativeLoadsPath::Engine));
         assert_eq!(hit.answered(), None);
-        assert_eq!(stub.probes.load(Ordering::SeqCst), 3, "probe must retry");
+        assert_eq!(
+            stub.probes.load(Ordering::SeqCst),
+            2,
+            "a 5xx is retried after one skipped tick, not memoized"
+        );
         assert_eq!(stub.gateway_probes.load(Ordering::SeqCst), 1);
+    }
+
+    /// Polls `worker` once and says whether the native route answered:
+    /// `NATIVE_BODY` reports 3 running requests, the `/metrics` gauges 7.
+    async fn served_natively(
+        worker: &Arc<dyn Worker>,
+        memo: &DashMap<String, NativeLoadsMemo>,
+    ) -> bool {
+        let resp = WorkerMonitor::fetch_http_load(worker, Some(memo))
+            .await
+            .expect("load response");
+        resp.loads[0].num_running_reqs == 3
+    }
+
+    #[tokio::test]
+    async fn a_route_that_keeps_failing_is_asked_less_and_less_often() {
+        // SGLang 0.5.15 answers every `/v1/loads` with a 500 (lab #9).
+        let stub = spawn_engine(StatusCode::INTERNAL_SERVER_ERROR, "").await;
+        let worker = vllm_worker(&stub.url);
+        let memo = DashMap::new();
+
+        for _ in 0..12 {
+            assert!(!served_natively(&worker, &memo).await, "served by /metrics");
+        }
+
+        assert_eq!(
+            stub.probes.load(Ordering::SeqCst),
+            3,
+            "asked on ticks 1, 3 and 7: each failure doubles the wait"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_back_off_ends_at_the_first_answer() {
+        let failing = spawn_engine(StatusCode::INTERNAL_SERVER_ERROR, "").await;
+        let failing_worker = vllm_worker(&failing.url);
+        let memo = DashMap::new();
+        for _ in 0..7 {
+            served_natively(&failing_worker, &memo).await;
+        }
+        let backed_off = memo
+            .get(failing_worker.url())
+            .map(|hit| *hit)
+            .expect("memo entry");
+
+        let healthy = spawn_engine(StatusCode::OK, NATIVE_BODY).await;
+        let worker = vllm_worker(&healthy.url);
+        memo.insert(worker.url().to_string(), backed_off);
+        let mut served = Vec::new();
+        for _ in 0..10 {
+            served.push(served_natively(&worker, &memo).await);
+        }
+
+        let mut expected = vec![false; 7];
+        expected.extend([true; 3]);
+        assert_eq!(
+            served, expected,
+            "the third failure's wait of 7 ticks runs out, then every tick is native"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_route_that_answered_starts_its_next_back_off_from_the_beginning() {
+        let failing = spawn_engine(StatusCode::INTERNAL_SERVER_ERROR, "").await;
+        let healthy = spawn_engine(StatusCode::OK, NATIVE_BODY).await;
+        let failing_again = spawn_engine(StatusCode::INTERNAL_SERVER_ERROR, "").await;
+        let memo = DashMap::new();
+        let carry = |from: &Stub, to: &Stub| {
+            let hit = memo.get(&from.url).map(|hit| *hit).expect("memo entry");
+            memo.insert(to.url.clone(), hit);
+        };
+
+        for _ in 0..7 {
+            served_natively(&vllm_worker(&failing.url), &memo).await;
+        }
+        carry(&failing, &healthy);
+        for _ in 0..8 {
+            if served_natively(&vllm_worker(&healthy.url), &memo).await {
+                break;
+            }
+        }
+        carry(&healthy, &failing_again);
+        for _ in 0..3 {
+            served_natively(&vllm_worker(&failing_again.url), &memo).await;
+        }
+
+        assert_eq!(
+            failing_again.probes.load(Ordering::SeqCst),
+            2,
+            "a first failure after an answer skips one tick, not the old streak's wait"
+        );
     }
 
     #[tokio::test]

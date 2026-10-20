@@ -1103,7 +1103,8 @@ impl WorkerMonitor {
         }
 
         // Write back only what changed, and before the gauge fetch below, so
-        // a worker evicted while that fetch runs is not written back.
+        // only the probes' window is left in which a concurrent eviction can
+        // be written back.
         if let Some(store) = native_loads_memo {
             if memo != known {
                 store.insert(worker.url().to_string(), memo);
@@ -1130,7 +1131,8 @@ impl WorkerMonitor {
     /// Distinguishing [`NativeLoads::Absent`] from [`NativeLoads::Inconclusive`]
     /// is what makes the memo safe. Collapsing both into "unsupported" would
     /// let one timeout demote a healthy backend to the expensive `/metrics`
-    /// path permanently.
+    /// path permanently. A 500 is neither: the route is there and failing, so
+    /// it backs off for a while instead ([`NativeLoads::ServerError`]).
     async fn probe_native_loads(worker: &Arc<dyn Worker>, path: NativeLoadsPath) -> NativeLoads {
         let url = path.probe_url(worker);
         let resp = match Self::authed_request(worker, &url).send().await {
@@ -3499,13 +3501,11 @@ sglang:token_usage{model_name="llama"} 0.5
     async fn a_poll_whose_route_does_not_answer_500_ends_the_streak() {
         let stub = spawn_engine(StatusCode::SERVICE_UNAVAILABLE, "").await;
         let worker = vllm_worker(&stub.url);
-        let long_ago = Instant::now()
-            .checked_sub(Duration::from_secs(300))
-            .expect("the clock is past 300 s");
         let mut streak = NativeLoadsMemo::default();
-        for _ in 0..3 {
-            streak.record_server_error(NativeLoadsPath::Engine, long_ago);
-        }
+        streak.failing[NativeLoadsPath::Engine.index()] = ServerErrors {
+            streak: 3,
+            retry_after: Some(Instant::now()),
+        };
         let memo = DashMap::new();
         memo.insert(worker.url().to_string(), streak);
 

@@ -273,7 +273,9 @@ pub(crate) async fn proxy_handler(
     match call_worker(&state, &worker, &req).await {
         Ok(outcome) => {
             if let Some((version, registered)) = version.zip(before).filter(|_| applied(&outcome)) {
-                state.versions.record(&registered, &[&worker], &version);
+                state
+                    .versions
+                    .record(&registered, &state.view.list(), &[&worker], &version);
             }
             let status = StatusCode::from_u16(outcome.status).unwrap_or(StatusCode::BAD_GATEWAY);
             (status, Json(outcome)).into_response()

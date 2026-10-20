@@ -74,7 +74,9 @@ pub async fn run_fanout(
             .map(|(w, _)| w)
             .collect();
         if !refitted.is_empty() {
-            state.versions.record(&registered, &refitted, &version);
+            state
+                .versions
+                .record(&registered, &state.view.list(), &refitted, &version);
         }
     }
 

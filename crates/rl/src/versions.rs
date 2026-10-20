@@ -11,7 +11,7 @@ use std::{
 use openai_protocol::rl::RlCallOutcome;
 use serde_json::Value;
 
-use crate::{proxy::ProxyRequest, view::RlWorkerInfo};
+use crate::view::RlWorkerInfo;
 
 const WEIGHT_VERSION: &str = "weight_version";
 
@@ -33,45 +33,37 @@ pub(crate) fn stamped_version(path: &str, body: &[u8]) -> Option<String> {
     }
 }
 
-/// The version `outcome` stamped: the call succeeded (an engine can answer
-/// 200 with `success: false`) and `req` named one.
-pub(crate) fn stamped_by(req: &ProxyRequest, outcome: &RlCallOutcome) -> Option<String> {
-    let refused = outcome.body.get("success") == Some(&Value::Bool(false));
-    if !outcome.is_success() || refused {
-        return None;
-    }
-    stamped_version(&req.path, &req.body)
+/// Whether the engine applied the call: it can answer 200 with
+/// `success: false`.
+pub(crate) fn applied(outcome: &RlCallOutcome) -> bool {
+    outcome.is_success() && outcome.body.get("success") != Some(&Value::Bool(false))
 }
 
-/// Whether `req` names a version a successful call would stamp, so the caller
-/// takes the registry snapshot to record against before it calls.
-pub(crate) fn names_a_version(req: &ProxyRequest) -> bool {
-    stamped_version(&req.path, &req.body).is_some()
-}
-
-// Keyed by worker id: a worker that registers again gets a new id and reports
-// its own metadata. Each version holds while the worker's `downs` and
+// Keyed by worker id. Each version holds while the worker's `downs` and
 // `revision` stay what they were before the refit was sent: an engine that went
-// down may have restarted on other weights, and a same-URL replacement brings
-// its own spec.
+// down may have restarted on other weights, and every same-URL replacement
+// (re-registration, `PUT` and `PATCH /workers/{id}`) bumps the revision and
+// brings its own labels. Remove and register gives the worker a new id.
 #[derive(Default)]
 pub(crate) struct ReportedVersions(Mutex<HashMap<String, (String, u64, u64)>>);
 
 impl ReportedVersions {
-    /// Record each called worker's stamped version for every rank of its engine
-    /// in `registered`, the snapshot taken before the calls, and drop entries
-    /// of workers not in it.
-    pub(crate) fn record(&self, registered: &[RlWorkerInfo], stamped: &[(&RlWorkerInfo, String)]) {
-        let by_engine: HashMap<&str, &str> = stamped
-            .iter()
-            .map(|(w, v)| (w.base_url.as_str(), v.as_str()))
-            .collect();
+    /// Record `version` for every rank in `registered`, the snapshot taken
+    /// before the calls, of an engine one of the `refitted` workers serves, and
+    /// drop entries of workers not in the snapshot.
+    pub(crate) fn record(
+        &self,
+        registered: &[RlWorkerInfo],
+        refitted: &[&RlWorkerInfo],
+        version: &str,
+    ) {
+        let engines: HashSet<&str> = refitted.iter().map(|w| w.base_url.as_str()).collect();
         let ids: HashSet<&str> = registered.iter().map(|w| w.id.as_str()).collect();
         let mut versions = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         versions.retain(|id, _| ids.contains(id.as_str()));
         for w in registered {
-            if let Some(v) = by_engine.get(w.base_url.as_str()) {
-                versions.insert(w.id.clone(), ((*v).to_string(), w.downs, w.revision));
+            if engines.contains(w.base_url.as_str()) {
+                versions.insert(w.id.clone(), (version.to_string(), w.downs, w.revision));
             }
         }
     }
@@ -171,7 +163,7 @@ mod tests {
         let still = worker("w2", "http://b:1", RuntimeType::Sglang);
         let versions = super::ReportedVersions::default();
 
-        versions.record(std::slice::from_ref(&still), &[(&gone, "4".to_string())]);
+        versions.record(std::slice::from_ref(&still), &[&gone], "4");
 
         assert_eq!(
             versions.apply(vec![gone])[0].labels["weight_version"],
@@ -183,7 +175,7 @@ mod tests {
     fn a_worker_that_went_down_since_the_refit_reports_its_registration_metadata() {
         let w = worker("w1", "http://a:1", RuntimeType::Sglang);
         let versions = super::ReportedVersions::default();
-        versions.record(std::slice::from_ref(&w), &[(&w, "7".to_string())]);
+        versions.record(std::slice::from_ref(&w), &[&w], "7");
         let mut back = w.clone();
         back.downs = 1;
 
@@ -198,7 +190,7 @@ mod tests {
     fn a_worker_replaced_since_the_refit_reports_its_new_metadata() {
         let w = worker("w1", "http://a:1", RuntimeType::Sglang);
         let versions = super::ReportedVersions::default();
-        versions.record(std::slice::from_ref(&w), &[(&w, "7".to_string())]);
+        versions.record(std::slice::from_ref(&w), &[&w], "7");
         let mut replaced = w.clone();
         replaced.revision = 1;
 

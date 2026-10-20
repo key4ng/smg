@@ -166,7 +166,8 @@ class TestRlControlPlaneTokenSpeed(RlControlPlaneBehavior):
         # The engine lists the loads its scheduler implements, and which ones
         # depends on the build (older builds: distributed only; current
         # nightlies add disk and mooncake). Discovery reports that list.
-        advertised = w["labels"]["rl.update_from"].split(",")
+        assert "rl.update_from" in w["labels"], w["labels"]
+        advertised = [x.strip() for x in w["labels"]["rl.update_from"].split(",") if x.strip()]
         assert w["capabilities"]["source"] == "label"
         assert set(w["capabilities"]["update_from"]) == set(advertised)
         assert "distributed" in advertised
@@ -175,10 +176,12 @@ class TestRlControlPlaneTokenSpeed(RlControlPlaneBehavior):
         self, setup_backend
     ):
         _backend, model, client, gateway = setup_backend
-        w = self._workers(gateway)["workers"][0]
-        model_path = w["labels"].get("model_path") or w["labels"].get("model")
-        assert model_path, w["labels"]
-        accepts_disk = "disk" in w["capabilities"]["update_from"]
+        workers = self._workers(gateway)["workers"]
+        model_path = workers[0]["labels"].get("model_path") or workers[0]["labels"].get("model")
+        assert model_path, workers[0]["labels"]
+        accepts = {"disk" in w["capabilities"]["update_from"] for w in workers}
+        assert len(accepts) == 1, "the lane's workers disagree on disk refits"
+        accepts_disk = accepts.pop()
 
         resp = self._engine(gateway, "pause_generation", {})
         assert resp.status_code == 200, f"pause_generation: {resp.text}"
@@ -189,26 +192,39 @@ class TestRlControlPlaneTokenSpeed(RlControlPlaneBehavior):
                 {"model_path": model_path, "weight_version": "e2e-disk", "flush_cache": True},
                 timeout=REFIT_TIMEOUT,
             )
-            body = resp.json()
             if accepts_disk:
                 assert resp.status_code == 200, resp.text
-                assert body["succeeded"] == 1, body
-                assert not body["failed"], body["failed"]
+                body = resp.json()
+                assert body["succeeded"] == len(workers), body
+                for outcome in body["results"].values():
+                    assert outcome["body"]["success"] is True, outcome
             else:
                 assert resp.status_code == 207, resp.text
+                body = resp.json()
                 assert body["succeeded"] == 0
-                assert len(body["failed"]) == 1, body["failed"]
-                failure = body["failed"][0]
-                assert failure["error"] == "upstream_error"
-                assert failure["status"] == 501
-                outcome = body["results"][failure["worker_id"]]
-                assert "distributed" in outcome["body"]["message"]
+                assert len(body["failed"]) == len(workers), body["failed"]
+                for failure in body["failed"]:
+                    assert failure["error"] == "upstream_error"
+                    assert failure["status"] == 501
+                    outcome = body["results"][failure["worker_id"]]
+                    assert "distributed" in outcome["body"]["message"]
         finally:
             # A refit, accepted or refused, leaves the engine paused like any
             # other control call would; resume it whatever the assertions
             # above decided.
             resumed = self._engine(gateway, "continue_generation", {})
         assert resumed.status_code == 200, f"continue_generation: {resumed.text}"
+
+        if accepts_disk:
+            resp = httpx.post(
+                f"{gateway.base_url}/generate",
+                json={"model": model, "text": "Hello", "sampling_params": {"max_new_tokens": 4}},
+                timeout=TIMEOUT,
+            )
+            assert resp.status_code == 200, resp.text
+            out = resp.json()
+            first = out[0] if isinstance(out, list) else out
+            assert first["meta_info"]["weight_version"] == "e2e-disk", first["meta_info"]
 
         completion = client.chat.completions.create(
             model=model,

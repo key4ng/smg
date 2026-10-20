@@ -326,12 +326,12 @@ impl NativeLoadsMemo {
     fn record_answered(&mut self, path: NativeLoadsPath) {
         self.answered = Some(path);
         self.absent[path.index()] = false;
-        self.failing[path.index()] = ServerErrors::default();
+        self.end_streak(path);
     }
 
     fn record_absent(&mut self, path: NativeLoadsPath) {
         self.absent[path.index()] = true;
-        self.failing[path.index()] = ServerErrors::default();
+        self.end_streak(path);
         if self.answered == Some(path) {
             self.answered = None;
         }
@@ -1102,7 +1102,15 @@ impl WorkerMonitor {
             }
         }
 
-        let response = match native {
+        // Write back only what changed, and before the gauge fetch below, so
+        // a worker evicted while that fetch runs is not written back.
+        if let Some(store) = native_loads_memo {
+            if memo != known {
+                store.insert(worker.url().to_string(), memo);
+            }
+        }
+
+        match native {
             Some(load) => {
                 liveness::on_contact(worker);
                 Some(load)
@@ -1114,15 +1122,7 @@ impl WorkerMonitor {
                 // native routes above were their only path.
                 _ => None,
             },
-        };
-        // Write back only what a probe actually settled, so a tick that
-        // learned nothing leaves the memo alone and retries next time.
-        if let Some(store) = native_loads_memo {
-            if memo != known {
-                store.insert(worker.url().to_string(), memo);
-            }
         }
-        response
     }
 
     /// Probe one native load route.
@@ -3493,6 +3493,32 @@ sglang:token_usage{model_name="llama"} 0.5
         let mut memo = NativeLoadsMemo::default();
         memo.record_server_error(NativeLoadsPath::Engine, tick + Duration::from_millis(5));
         assert!(engine_route_due(memo, tick + Duration::from_secs(10)));
+    }
+
+    #[tokio::test]
+    async fn a_poll_whose_route_does_not_answer_500_ends_the_streak() {
+        let stub = spawn_engine(StatusCode::SERVICE_UNAVAILABLE, "").await;
+        let worker = vllm_worker(&stub.url);
+        let long_ago = Instant::now()
+            .checked_sub(Duration::from_secs(300))
+            .expect("the clock is past 300 s");
+        let mut streak = NativeLoadsMemo::default();
+        for _ in 0..3 {
+            streak.record_server_error(NativeLoadsPath::Engine, long_ago);
+        }
+        let memo = DashMap::new();
+        memo.insert(worker.url().to_string(), streak);
+
+        served_natively(&worker, &memo).await;
+
+        assert_eq!(stub.probes.load(Ordering::SeqCst), 1);
+        let mut after = memo.get(worker.url()).map(|hit| *hit).expect("memo entry");
+        let now = Instant::now();
+        after.record_server_error(NativeLoadsPath::Engine, now);
+        assert!(
+            engine_route_due(after, now + SERVER_ERROR_BACKOFF),
+            "the 503 ended the streak, so the next 500 waits the first back-off"
+        );
     }
 
     #[test]

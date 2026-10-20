@@ -243,6 +243,8 @@ pub enum RuntimeType {
     Mlx,
     /// TokenSpeed runtime.
     TokenSpeed,
+    /// DeepInfer runtime (DeepSeek), served through `smg_grpc_servicer.deepinfer`.
+    DeepInfer,
     /// Generic OpenAI-compatible HTTP backend whose engine could not be
     /// identified (e.g. a nested SMG gateway fronting the real engine).
     /// Routed as plain OpenAI HTTP; no engine-specific features are assumed.
@@ -267,6 +269,7 @@ impl RuntimeType {
             RuntimeType::Trtllm => "trtllm",
             RuntimeType::Mlx => "mlx",
             RuntimeType::TokenSpeed => "tokenspeed",
+            RuntimeType::DeepInfer => "deepinfer",
             RuntimeType::Generic => "generic",
             RuntimeType::External => "external",
         }
@@ -295,6 +298,8 @@ impl std::str::FromStr for RuntimeType {
             Ok(RuntimeType::Mlx)
         } else if s.eq_ignore_ascii_case("tokenspeed") {
             Ok(RuntimeType::TokenSpeed)
+        } else if s.eq_ignore_ascii_case("deepinfer") {
+            Ok(RuntimeType::DeepInfer)
         } else if s.eq_ignore_ascii_case("generic") {
             Ok(RuntimeType::Generic)
         } else if s.eq_ignore_ascii_case("external") {

@@ -29,7 +29,7 @@ use crate::{
 /// Detect gRPC backend by trying runtime-specific health checks sequentially.
 ///
 /// If `runtime_hint` is provided (from explicit config), tries that first.
-/// Otherwise tries sglang → vllm → trtllm → mlx.
+/// Otherwise tries sglang → vllm → trtllm → tokenspeed → mlx → deepinfer.
 async fn detect_grpc_backend(
     url: &str,
     timeout_secs: u64,
@@ -48,7 +48,7 @@ async fn detect_grpc_backend(
     }
 
     // Try each runtime sequentially (most common first), skipping the hint we already tried
-    for runtime in &["sglang", "vllm", "trtllm", "tokenspeed", "mlx"] {
+    for runtime in &["sglang", "vllm", "trtllm", "tokenspeed", "mlx", "deepinfer"] {
         if Some(*runtime) == runtime_hint {
             continue;
         }
@@ -61,7 +61,7 @@ async fn detect_grpc_backend(
     }
 
     Err(format!(
-        "gRPC backend detection failed for {url} (tried sglang, vllm, trtllm, tokenspeed, mlx)"
+        "gRPC backend detection failed for {url} (tried sglang, vllm, trtllm, tokenspeed, mlx, deepinfer)"
     ))
 }
 

@@ -134,6 +134,7 @@ mod tests {
         for rt in [
             RuntimeType::Trtllm,
             RuntimeType::Mlx,
+            RuntimeType::DeepInfer,
             RuntimeType::Generic,
             RuntimeType::External,
             RuntimeType::Unspecified,

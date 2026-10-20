@@ -356,6 +356,7 @@ fn backend_name(client: &BackendClient) -> &'static str {
         RuntimeType::Trtllm => "TRT-LLM",
         RuntimeType::Mlx => "MLX",
         RuntimeType::TokenSpeed => "TokenSpeed",
+        RuntimeType::DeepInfer => "DeepInfer",
         // A gRPC/ZMQ worker is always a local runtime; External (an upstream
         // OpenAI-compatible API, HTTP-proxied), Generic (an unidentified
         // OpenAI-compatible HTTP backend), and Unspecified never reach here.

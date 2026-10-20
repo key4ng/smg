@@ -296,6 +296,24 @@ fn build_harmony_proto(
                 tool_constraints,
             )?))
         }
+        (BackendClient::Grpc(GrpcClient::DeepInfer(c)), Chat(b)) => {
+            ProtoGenerateRequest::DeepInfer(Box::new(c.build_generate_request_from_chat(
+                request_id,
+                b,
+                text,
+                token_ids,
+                tool_constraints,
+            )?))
+        }
+        (BackendClient::Grpc(GrpcClient::DeepInfer(c)), Responses(b)) => {
+            ProtoGenerateRequest::DeepInfer(Box::new(c.build_generate_request_from_responses(
+                request_id,
+                b,
+                text,
+                token_ids,
+                tool_constraints,
+            )?))
+        }
         (BackendClient::Grpc(GrpcClient::Vllm(_)), body) => {
             build_vllm(body, request_id, text, token_ids, tool_constraints)?
         }

@@ -112,6 +112,16 @@ impl BuildStage for EmbeddingRequestBuildingStage {
                     "MLX embedding is not supported via gRPC",
                 ));
             }
+            BackendClient::Grpc(GrpcClient::DeepInfer(_)) => {
+                error!(
+                    function = "EmbeddingRequestBuildingStage::build",
+                    "DeepInfer embedding not supported"
+                );
+                return Err(error::not_implemented(
+                    "unsupported_backend",
+                    "DeepInfer embedding is not supported via gRPC",
+                ));
+            }
             BackendClient::Grpc(GrpcClient::TokenSpeed(_)) => {
                 error!(
                     function = "EmbeddingRequestBuildingStage::build",

@@ -1,4 +1,5 @@
-//! Unified gRPC client wrapper for SGLang, vLLM, and TensorRT-LLM backends
+//! Unified gRPC client wrapper for SGLang, vLLM, TensorRT-LLM, MLX, TokenSpeed,
+//! and DeepInfer backends
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -10,10 +11,10 @@ use openai_protocol::{
     worker::{ConstrainedDecoding, WorkerLoadResponse},
 };
 use smg_grpc_client::{
-    common_proto, mlx_proto, sglang_proto, tokenizer_bundle, tokenizer_bundle::StreamBundle,
-    tokenspeed_proto, trtllm_proto, vllm_proto, BoxedTraceInjector, MlxEngineClient,
-    SglangGenerateRequestOptions, SglangSchedulerClient, TokenSpeedSchedulerClient,
-    TrtllmServiceClient, VllmEngineClient,
+    common_proto, deepinfer_proto, mlx_proto, sglang_proto, tokenizer_bundle,
+    tokenizer_bundle::StreamBundle, tokenspeed_proto, trtllm_proto, vllm_proto, BoxedTraceInjector,
+    DeepInferEngineClient, MlxEngineClient, SglangGenerateRequestOptions, SglangSchedulerClient,
+    TokenSpeedSchedulerClient, TrtllmServiceClient, VllmEngineClient,
 };
 
 use super::multimodal::SUPPORTS_VISION_LABEL;
@@ -53,6 +54,7 @@ pub enum GrpcClient {
     Trtllm(TrtllmServiceClient),
     Mlx(MlxEngineClient),
     TokenSpeed(TokenSpeedSchedulerClient),
+    DeepInfer(DeepInferEngineClient),
 }
 
 #[derive(Default)]
@@ -90,6 +92,10 @@ impl GrpcClient {
         matches!(self, Self::Mlx(_))
     }
 
+    pub fn is_deepinfer(&self) -> bool {
+        matches!(self, Self::DeepInfer(_))
+    }
+
     #[expect(
         clippy::panic,
         reason = "typed accessor: caller guarantees variant via is_tokenspeed() check"
@@ -115,6 +121,7 @@ impl GrpcClient {
             Self::Trtllm(_) => RuntimeType::Trtllm,
             Self::Mlx(_) => RuntimeType::Mlx,
             Self::TokenSpeed(_) => RuntimeType::TokenSpeed,
+            Self::DeepInfer(_) => RuntimeType::DeepInfer,
         }
     }
 
@@ -141,6 +148,9 @@ impl GrpcClient {
             )),
             "tokenspeed" => Ok(Self::TokenSpeed(
                 TokenSpeedSchedulerClient::connect_with_trace_injector(url, trace_injector).await?,
+            )),
+            "deepinfer" => Ok(Self::DeepInfer(
+                DeepInferEngineClient::connect_with_trace_injector(url, trace_injector).await?,
             )),
             _ => Err(format!("Unknown runtime type: {runtime_type}").into()),
         }
@@ -184,6 +194,13 @@ impl GrpcClient {
                     message: resp.message,
                 })
             }
+            Self::DeepInfer(client) => {
+                let resp = client.health_check().await?;
+                Ok(HealthCheckResponse {
+                    healthy: resp.healthy,
+                    message: resp.message,
+                })
+            }
         }
     }
 
@@ -196,6 +213,7 @@ impl GrpcClient {
             Self::TokenSpeed(client) => Ok(ModelInfo::TokenSpeed(Box::new(
                 client.get_model_info().await?,
             ))),
+            Self::DeepInfer(client) => Ok(ModelInfo::DeepInfer(client.get_model_info().await?)),
         }
     }
 
@@ -240,9 +258,9 @@ impl GrpcClient {
             Self::Sglang(client) => client.flush_cache(timeout_s).await,
             Self::TokenSpeed(client) => client.flush_cache(timeout_s).await,
             Self::Vllm(client) => client.flush_cache(timeout_s).await,
-            Self::Trtllm(_) | Self::Mlx(_) => Err(tonic::Status::unimplemented(
-                "FlushCache RPC not supported for this backend",
-            )),
+            Self::Trtllm(_) | Self::Mlx(_) | Self::DeepInfer(_) => Err(
+                tonic::Status::unimplemented("FlushCache RPC not supported for this backend"),
+            ),
         }
     }
 
@@ -255,9 +273,9 @@ impl GrpcClient {
         match self {
             Self::Sglang(client) => client.start_profile(req).await,
             Self::TokenSpeed(client) => client.start_profile(req).await,
-            Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) => Err(tonic::Status::unimplemented(
-                "StartProfile RPC not supported for this backend",
-            )),
+            Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::DeepInfer(_) => Err(
+                tonic::Status::unimplemented("StartProfile RPC not supported for this backend"),
+            ),
         }
     }
 
@@ -267,9 +285,9 @@ impl GrpcClient {
         match self {
             Self::Sglang(client) => client.stop_profile().await,
             Self::TokenSpeed(client) => client.stop_profile().await,
-            Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) => Err(tonic::Status::unimplemented(
-                "StopProfile RPC not supported for this backend",
-            )),
+            Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::DeepInfer(_) => Err(
+                tonic::Status::unimplemented("StopProfile RPC not supported for this backend"),
+            ),
         }
     }
 
@@ -307,6 +325,9 @@ impl GrpcClient {
             Self::Mlx(_) => Err(tonic::Status::unimplemented(
                 "SubscribeKvEvents RPC not supported for MLX backend",
             )),
+            Self::DeepInfer(_) => Err(tonic::Status::unimplemented(
+                "SubscribeKvEvents RPC not supported for DeepInfer backend",
+            )),
         }
     }
 
@@ -321,6 +342,7 @@ impl GrpcClient {
             Self::TokenSpeed(client) => Ok(ServerInfo::TokenSpeed(Box::new(
                 client.get_server_info().await?,
             ))),
+            Self::DeepInfer(client) => Ok(ServerInfo::DeepInfer(client.get_server_info().await?)),
         }
     }
 
@@ -334,6 +356,7 @@ impl GrpcClient {
             Self::Trtllm(client) => client.get_tokenizer().await,
             Self::Mlx(client) => client.get_tokenizer().await,
             Self::TokenSpeed(client) => client.get_tokenizer().await,
+            Self::DeepInfer(client) => client.get_tokenizer().await,
         }?;
 
         tokenizer_bundle::validate_bundle_sha256(&bundle).map_err(|e| {
@@ -377,6 +400,10 @@ impl GrpcClient {
                 let stream = client.generate(*boxed_req).await?;
                 Ok(ProtoStream::Mlx(stream))
             }
+            (Self::DeepInfer(client), ProtoGenerateRequest::DeepInfer(boxed_req)) => {
+                let stream = client.generate(*boxed_req).await?;
+                Ok(ProtoStream::DeepInfer(stream))
+            }
             (Self::TokenSpeed(client), ProtoGenerateRequest::TokenSpeed(boxed_req)) => {
                 let shm_handles = collect_tokenspeed_generate_request_shm_handles(&boxed_req);
                 match client.generate(*boxed_req).await {
@@ -414,6 +441,9 @@ impl GrpcClient {
             (Self::Mlx(_), _) => Err(tonic::Status::unimplemented(
                 "MLX backend does not support embedding",
             )),
+            (Self::DeepInfer(_), _) => Err(tonic::Status::unimplemented(
+                "DeepInfer backend does not support embedding",
+            )),
             #[expect(
                 clippy::panic,
                 reason = "client and request types are always matched by construction in the pipeline"
@@ -442,6 +472,7 @@ impl GrpcClient {
                 vllm: VllmEngineClient::build_generate_request_from_chat,
                 trtllm: TrtllmServiceClient::build_generate_request_from_chat,
                 mlx: MlxEngineClient::build_generate_request_from_chat,
+                deepinfer: DeepInferEngineClient::build_generate_request_from_chat,
                 tokenspeed: TokenSpeedSchedulerClient::build_generate_request_from_chat,
             },
         )
@@ -467,6 +498,7 @@ impl GrpcClient {
                 vllm: VllmEngineClient::build_generate_request_from_messages,
                 trtllm: TrtllmServiceClient::build_generate_request_from_messages,
                 mlx: MlxEngineClient::build_generate_request_from_messages,
+                deepinfer: DeepInferEngineClient::build_generate_request_from_messages,
                 tokenspeed: TokenSpeedSchedulerClient::build_generate_request_from_messages,
             },
         )
@@ -490,6 +522,7 @@ impl GrpcClient {
                 vllm: VllmEngineClient::build_generate_request_from_completion,
                 trtllm: TrtllmServiceClient::build_generate_request_from_completion,
                 mlx: MlxEngineClient::build_generate_request_from_completion,
+                deepinfer: DeepInferEngineClient::build_generate_request_from_completion,
                 tokenspeed: TokenSpeedSchedulerClient::build_generate_request_from_completion,
             },
         )
@@ -513,6 +546,7 @@ impl GrpcClient {
                 vllm: VllmEngineClient::build_plain_generate_request,
                 trtllm: TrtllmServiceClient::build_plain_generate_request,
                 mlx: MlxEngineClient::build_plain_generate_request,
+                deepinfer: DeepInferEngineClient::build_plain_generate_request,
                 tokenspeed: TokenSpeedSchedulerClient::build_plain_generate_request,
             },
         )
@@ -543,6 +577,7 @@ impl GrpcClient {
             trtllm,
             mlx,
             tokenspeed,
+            deepinfer,
         } = builders;
         match self {
             Self::Sglang(client) => {
@@ -608,6 +643,18 @@ impl GrpcClient {
                 )?;
                 Ok(ProtoGenerateRequest::Mlx(Box::new(req)))
             }
+            // DeepInfer: the assembly stage rejects multimodal before this path.
+            Self::DeepInfer(client) => {
+                let req = deepinfer(
+                    client,
+                    request_id,
+                    body,
+                    processed_text,
+                    token_ids,
+                    tool_constraints,
+                )?;
+                Ok(ProtoGenerateRequest::DeepInfer(Box::new(req)))
+            }
             Self::TokenSpeed(_) => {
                 let tokenspeed_mm = engine_multimodal(multimodal_inputs, |mm| match mm {
                     MultimodalData::TokenSpeed(data) => Some(data.into_proto(true)),
@@ -643,6 +690,7 @@ impl GrpcClient {
             trtllm,
             mlx,
             tokenspeed,
+            deepinfer,
         } = builders;
         Ok(match self {
             Self::Sglang(client) => ProtoGenerateRequest::Sglang(Box::new(sglang(
@@ -659,6 +707,9 @@ impl GrpcClient {
             }
             Self::TokenSpeed(_) => ProtoGenerateRequest::TokenSpeed(Box::new(tokenspeed(
                 request_id, body, text, token_ids,
+            )?)),
+            Self::DeepInfer(client) => ProtoGenerateRequest::DeepInfer(Box::new(deepinfer(
+                client, request_id, body, text, token_ids,
             )?)),
         })
     }
@@ -719,6 +770,17 @@ type MlxClientMmBuilder<B> = fn(
     Option<(String, String)>,
 ) -> Result<mlx_proto::GenerateRequest, String>;
 
+/// The DeepInfer counterpart of [`MlxClientMmBuilder`]; the gateway sends
+/// DeepInfer no multimodal inputs yet.
+type DeepInferClientMmBuilder<B> = fn(
+    &DeepInferEngineClient,
+    String,
+    &B,
+    String,
+    Vec<u32>,
+    Option<(String, String)>,
+) -> Result<deepinfer_proto::GenerateRequest, String>;
+
 /// A vLLM builder for a request kind with neither multimodal inputs nor tool
 /// constraints (completion, plain generate); `T` is the builder's text
 /// parameter. The ZMQ dispatch in `backend_client` builds through the same
@@ -752,17 +814,27 @@ type TrtllmClientPlainBuilder<B, T> = fn(
 type MlxClientPlainBuilder<B, T> =
     fn(&MlxEngineClient, String, &B, T, Vec<u32>) -> Result<mlx_proto::GenerateRequest, String>;
 
+/// The DeepInfer counterpart of [`VllmPlainBuilder`] on the connected client.
+type DeepInferClientPlainBuilder<B, T> = fn(
+    &DeepInferEngineClient,
+    String,
+    &B,
+    T,
+    Vec<u32>,
+) -> Result<deepinfer_proto::GenerateRequest, String>;
+
 /// The engines' builders of one request kind that carries multimodal inputs and
 /// tool constraints (chat, Messages): the only thing that differs between the
 /// two build surfaces, so the per-engine dispatch lives once in
-/// [`GrpcClient::build_engine_request`]. SGLang, TRT-LLM and MLX build on their
-/// client; vLLM and TokenSpeed on the type.
+/// [`GrpcClient::build_engine_request`]. SGLang, TRT-LLM, MLX and DeepInfer
+/// build on their client; vLLM and TokenSpeed on the type.
 struct EngineBuilders<B> {
     sglang: SglangClientMmBuilder<B>,
     vllm: VllmMmBuilder<B>,
     trtllm: TrtllmClientMmBuilder<B>,
     mlx: MlxClientMmBuilder<B>,
     tokenspeed: TokenSpeedMmBuilder<B>,
+    deepinfer: DeepInferClientMmBuilder<B>,
 }
 
 /// The engines' builders of one request kind with neither multimodal inputs nor
@@ -776,6 +848,7 @@ struct EnginePlainBuilders<B, T> {
     trtllm: TrtllmClientPlainBuilder<B, T>,
     mlx: MlxClientPlainBuilder<B, T>,
     tokenspeed: TokenSpeedPlainBuilder<B, T>,
+    deepinfer: DeepInferClientPlainBuilder<B, T>,
 }
 
 /// The assembled multimodal data as the proto of the worker's engine, `own`
@@ -807,6 +880,7 @@ pub enum ModelInfo {
     Trtllm(trtllm_proto::GetModelInfoResponse),
     Mlx(mlx_proto::GetModelInfoResponse),
     TokenSpeed(Box<tokenspeed_proto::GetModelInfoResponse>),
+    DeepInfer(deepinfer_proto::GetModelInfoResponse),
 }
 
 pub enum ServerInfo {
@@ -815,6 +889,7 @@ pub enum ServerInfo {
     Trtllm(trtllm_proto::GetServerInfoResponse),
     Mlx(mlx_proto::GetServerInfoResponse),
     TokenSpeed(Box<tokenspeed_proto::GetServerInfoResponse>),
+    DeepInfer(deepinfer_proto::GetServerInfoResponse),
 }
 
 impl ModelInfo {
@@ -832,6 +907,7 @@ impl ModelInfo {
             ModelInfo::Trtllm(info) => without_unset_vision(flat_labels(info)),
             ModelInfo::Mlx(info) => without_unset_vision(flat_labels(info)),
             ModelInfo::TokenSpeed(info) => without_unset_vision(flat_labels(info)),
+            ModelInfo::DeepInfer(info) => without_unset_vision(flat_labels(info)),
         }
     }
 }
@@ -873,6 +949,7 @@ impl ServerInfo {
             ServerInfo::Vllm(info) => flat_labels(info),
             ServerInfo::Trtllm(info) => flat_labels(info),
             ServerInfo::Mlx(info) => flat_labels(info),
+            ServerInfo::DeepInfer(info) => flat_labels(info),
             ServerInfo::TokenSpeed(info) => {
                 let mut labels = HashMap::new();
                 if let Some(ref args) = info.server_args {

@@ -79,6 +79,7 @@ impl PdProtocol {
             }),
             RuntimeType::Trtllm
             | RuntimeType::Mlx
+            | RuntimeType::DeepInfer
             | RuntimeType::Generic
             | RuntimeType::External
             | RuntimeType::Unspecified => None,
@@ -110,6 +111,7 @@ mod tests {
         for runtime in [
             RuntimeType::Trtllm,
             RuntimeType::Mlx,
+            RuntimeType::DeepInfer,
             RuntimeType::Generic,
             RuntimeType::External,
             RuntimeType::Unspecified,

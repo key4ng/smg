@@ -7,7 +7,7 @@ use engine_zmq_adapter::stops::encode_single_token_stops;
 use llm_tokenizer::traits::Tokenizer;
 use rand::RngExt;
 use smg_grpc_client::{
-    mlx_proto,
+    deepinfer_proto, mlx_proto,
     sglang_proto::{self, DisaggregatedParams},
     tokenspeed_proto, vllm_proto,
 };
@@ -295,6 +295,7 @@ pub(crate) enum SamplingBaseline {
     Vllm(vllm_proto::SamplingParams),
     Mlx(mlx_proto::SamplingParams),
     TokenSpeed(tokenspeed_proto::SamplingParams),
+    DeepInfer(deepinfer_proto::SamplingParams),
 }
 
 impl SamplingBaseline {
@@ -305,6 +306,9 @@ impl SamplingBaseline {
             ProtoGenerateRequest::Mlx(req) => req.sampling_params.clone().map(Self::Mlx),
             ProtoGenerateRequest::TokenSpeed(req) => {
                 req.sampling_params.clone().map(Self::TokenSpeed)
+            }
+            ProtoGenerateRequest::DeepInfer(req) => {
+                req.sampling_params.clone().map(Self::DeepInfer)
             }
             ProtoGenerateRequest::Trtllm(_) => None,
         }
@@ -359,6 +363,22 @@ impl SamplingBaseline {
             (ProtoGenerateRequest::TokenSpeed(req), Self::TokenSpeed(baseline)) => {
                 if let Some(params) = req.sampling_params.as_mut() {
                     restore!(params, baseline);
+                }
+                Ok(())
+            }
+            // DeepInfer's proto has no min_p or repetition penalty: only the
+            // fields its defaults can set are restored.
+            (ProtoGenerateRequest::DeepInfer(req), Self::DeepInfer(baseline)) => {
+                if let Some(params) = req.sampling_params.as_mut() {
+                    if mask.temperature {
+                        params.temperature = baseline.temperature;
+                    }
+                    if mask.top_p {
+                        params.top_p = baseline.top_p;
+                    }
+                    if mask.top_k {
+                        params.top_k = baseline.top_k;
+                    }
                 }
                 Ok(())
             }
@@ -617,6 +637,15 @@ fn apply_sampling_defaults_with_mask(
             };
             apply_tokenspeed_sampling_defaults(params, defaults, mask);
         }
+        ProtoGenerateRequest::DeepInfer(req) => {
+            let Some(params) = req.sampling_params.as_mut() else {
+                warn!(
+                    "Cannot apply sampling defaults to DeepInfer request without sampling_params"
+                );
+                return;
+            };
+            apply_deepinfer_sampling_defaults(params, defaults, mask);
+        }
         ProtoGenerateRequest::Trtllm(_) => {}
     }
 }
@@ -678,6 +707,22 @@ optional_temperature_sampling_defaults_fn!(
     vllm_proto::SamplingParams
 );
 optional_temperature_sampling_defaults_fn!(apply_mlx_sampling_defaults, mlx_proto::SamplingParams);
+
+/// DeepInfer's sampler has no min_p or repetition penalty, so a model default
+/// for either has nowhere to go and is not applied.
+fn apply_deepinfer_sampling_defaults(
+    params: &mut deepinfer_proto::SamplingParams,
+    defaults: SamplingDefaults,
+    mask: SamplingDefaultsMask,
+) {
+    if mask.temperature {
+        if let Some(value) = defaults.temperature {
+            params.temperature = Some(value);
+        }
+    }
+    apply_numeric_default!(params, defaults, mask, top_p);
+    apply_unsigned_top_k_default!(params, defaults, mask);
+}
 
 /// TokenSpeed declares every sampling scalar as `optional` so the servicer
 /// can distinguish "client set 0" from "client unset". Apply defaults by

@@ -587,6 +587,7 @@ fn image_wire_dtype(
         ),
         RuntimeType::Trtllm
         | RuntimeType::Mlx
+        | RuntimeType::DeepInfer
         | RuntimeType::Generic
         | RuntimeType::External
         | RuntimeType::Unspecified => return None,

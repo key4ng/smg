@@ -1,0 +1,137 @@
+syntax = "proto3";
+package deepinfer.grpc.engine;
+
+import "common.proto";
+
+// DeepInfer (https://github.com/deepseek-ai/DeepInfer) ships no serving
+// interface of its own; smg_grpc_servicer.deepinfer implements this service
+// around DeepInfer's in-process LLMEngine. One server fronts one engine rank:
+// a data-parallel deployment runs one server per rank, and the gateway sees
+// each as its own worker.
+service DeepInferEngine {
+  rpc Generate(GenerateRequest) returns (stream GenerateResponse);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+  rpc Abort(AbortRequest) returns (AbortResponse);
+  rpc GetModelInfo(GetModelInfoRequest) returns (GetModelInfoResponse);
+  rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+  rpc GetTokenizer(smg.grpc.common.GetTokenizerRequest)
+      returns (stream smg.grpc.common.GetTokenizerChunk);
+}
+
+message GenerateRequest {
+  string request_id = 1;
+  TokenizedInput tokenized = 2;
+  SamplingParams sampling_params = 3;
+  bool stream = 4;
+}
+
+message TokenizedInput {
+  string original_text = 1;
+  repeated uint32 input_ids = 2;
+}
+
+// Only what DeepInfer's sampler implements. min_p, penalties, logit bias,
+// stop strings and n > 1 have no engine counterpart and are refused by the
+// gateway before a request is built.
+message SamplingParams {
+  optional float temperature = 1;
+  float top_p = 2;
+  // 0 disables top-k.
+  uint32 top_k = 3;
+  optional uint32 max_tokens = 4;
+  // Enforced by the servicer: the engine itself stops only on the model's EOS.
+  repeated uint32 stop_token_ids = 5;
+  bool ignore_eos = 6;
+  // Top logprobs per output token; absent returns no logprobs.
+  optional int32 logprobs = 7;
+  optional uint64 seed = 8;
+
+  // Structured output, compiled by the engine's xgrammar backend.
+  oneof constraint {
+    string json_schema = 9;
+    string regex = 10;
+    string ebnf = 11;
+  }
+}
+
+message GenerateResponse {
+  oneof response {
+    GenerateStreamChunk chunk = 1;
+    GenerateComplete complete = 2;
+  }
+}
+
+// Tokens produced since the previous chunk (delta, not cumulative).
+message GenerateStreamChunk {
+  repeated uint32 token_ids = 1;
+  uint32 prompt_tokens = 2;
+  uint32 completion_tokens = 3;
+  uint32 cached_tokens = 4;
+  OutputLogProbs output_logprobs = 5;
+  uint32 index = 6;
+}
+
+message GenerateComplete {
+  // Every output token of the request (all of them, also when streaming).
+  repeated uint32 output_ids = 1;
+  // "stop", "length" or "abort"; engine-side failures are reported as a gRPC
+  // error instead.
+  string finish_reason = 2;
+  uint32 prompt_tokens = 3;
+  uint32 completion_tokens = 4;
+  uint32 cached_tokens = 5;
+  OutputLogProbs output_logprobs = 6;
+  uint32 index = 7;
+  optional uint32 matched_stop_token_id = 8;
+}
+
+message OutputLogProbs {
+  repeated float token_logprobs = 1;
+  repeated uint32 token_ids = 2;
+  repeated TopLogProbs top_logprobs = 3;
+}
+
+message TopLogProbs {
+  repeated float values = 1;
+  repeated uint32 token_ids = 2;
+}
+
+message HealthCheckRequest {}
+message HealthCheckResponse {
+  bool healthy = 1;
+  string message = 2;
+}
+
+message AbortRequest {
+  repeated string request_ids = 1;
+}
+message AbortResponse {}
+
+message GetModelInfoRequest {}
+message GetModelInfoResponse {
+  string model_path = 1;
+  bool is_generation = 2;
+  uint32 max_context_length = 3;
+  uint32 vocab_size = 4;
+  string served_model_name = 5;
+  string model_type = 6;
+  repeated string architectures = 7;
+  repeated uint32 eos_token_ids = 8;
+  uint32 pad_token_id = 9;
+  uint32 bos_token_id = 10;
+  uint32 max_req_input_len = 11;
+}
+
+message GetServerInfoRequest {}
+// Deliberately carries no data-parallel width: each rank is its own worker,
+// and a reported dp_size would make the gateway route it as a grouped one.
+message GetServerInfoResponse {
+  string server_type = 1;
+  uint32 active_requests = 2;
+  double uptime_seconds = 3;
+  uint32 engine_rank = 4;
+  uint32 expert_parallel_size = 5;
+  uint32 context_parallel_size = 6;
+  uint32 max_num_seqs = 7;
+  uint32 max_num_batched_tokens = 8;
+}

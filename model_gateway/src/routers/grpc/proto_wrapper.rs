@@ -27,6 +27,8 @@ use rand::RngExt;
 use rustix::fs::FallocateFlags;
 use smg_grpc_client::{
     common_proto::{self as common},
+    deepinfer_engine::AbortOnDropStream as DeepInferStream,
+    deepinfer_proto::{self as deepinfer},
     mlx_engine::AbortOnDropStream as MlxStream,
     mlx_proto::{self as mlx},
     sglang_proto::{self as sglang, generate_complete::MatchedStop as SglangMatchedStop},
@@ -1274,6 +1276,7 @@ pub enum ProtoGenerateRequest {
     Vllm(Box<vllm::GenerateRequest>),
     Trtllm(Box<trtllm::GenerateRequest>),
     Mlx(Box<mlx::GenerateRequest>),
+    DeepInfer(Box<deepinfer::GenerateRequest>),
     TokenSpeed(Box<tokenspeed::GenerateRequest>),
 }
 
@@ -1306,6 +1309,11 @@ impl ProtoGenerateRequest {
                 }
             }
             Self::Mlx(req) => {
+                if let Some(params) = req.sampling_params.as_mut() {
+                    params.stop_token_ids.extend_from_slice(ids);
+                }
+            }
+            Self::DeepInfer(req) => {
                 if let Some(params) = req.sampling_params.as_mut() {
                     params.stop_token_ids.extend_from_slice(ids);
                 }
@@ -1451,7 +1459,11 @@ impl ProtoGenerateRequest {
                 params.stop_token_ids.clear();
                 params.ignore_eos = true;
             }
-            Self::Sglang(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => {
+            Self::Sglang(_)
+            | Self::Trtllm(_)
+            | Self::Mlx(_)
+            | Self::DeepInfer(_)
+            | Self::TokenSpeed(_) => {
                 tracing::warn!(
                     "sanitize_sampling_for_prefill called on non-vLLM request, ignoring"
                 );
@@ -1466,6 +1478,7 @@ impl ProtoGenerateRequest {
             Self::Sglang(req) => req.stream = stream,
             Self::Trtllm(req) => req.streaming = stream,
             Self::Mlx(req) => req.stream = stream,
+            Self::DeepInfer(req) => req.stream = stream,
             Self::TokenSpeed(req) => req.stream = stream,
         }
     }
@@ -1478,6 +1491,7 @@ impl ProtoGenerateRequest {
             Self::Sglang(req) => req.stream,
             Self::Trtllm(req) => req.streaming,
             Self::Mlx(req) => req.stream,
+            Self::DeepInfer(req) => req.stream,
             Self::TokenSpeed(req) => req.stream,
         }
     }
@@ -1490,6 +1504,7 @@ impl ProtoGenerateRequest {
             Self::Vllm(req) => req.encoded_len(),
             Self::Trtllm(req) => req.encoded_len(),
             Self::Mlx(req) => req.encoded_len(),
+            Self::DeepInfer(req) => req.encoded_len(),
             Self::TokenSpeed(req) => req.encoded_len(),
         }
     }
@@ -1543,6 +1558,7 @@ impl ProtoGenerateRequest {
             }
             Self::Trtllm(req) => Self::Trtllm(req.clone()),
             Self::Mlx(req) => Self::Mlx(req.clone()),
+            Self::DeepInfer(req) => Self::DeepInfer(req.clone()),
         }
     }
 
@@ -1610,7 +1626,7 @@ impl ProtoGenerateRequest {
                     }
                 }
             }
-            Self::Trtllm(_) | Self::Mlx(_) => {}
+            Self::Trtllm(_) | Self::Mlx(_) | Self::DeepInfer(_) => {}
         }
     }
 
@@ -1621,6 +1637,7 @@ impl ProtoGenerateRequest {
             Self::Vllm(req) => &req.request_id,
             Self::Trtllm(req) => &req.request_id,
             Self::Mlx(req) => &req.request_id,
+            Self::DeepInfer(req) => &req.request_id,
             Self::TokenSpeed(req) => &req.request_id,
         }
     }
@@ -1633,6 +1650,7 @@ impl ProtoGenerateRequest {
             Self::Vllm(req) => req.request_id = request_id,
             Self::Trtllm(req) => req.request_id = request_id,
             Self::Mlx(req) => req.request_id = request_id,
+            Self::DeepInfer(req) => req.request_id = request_id,
             Self::TokenSpeed(req) => req.request_id = request_id,
         }
     }
@@ -1647,7 +1665,11 @@ impl ProtoGenerateRequest {
                     remote_port,
                 });
             }
-            Self::Sglang(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => {
+            Self::Sglang(_)
+            | Self::Trtllm(_)
+            | Self::Mlx(_)
+            | Self::DeepInfer(_)
+            | Self::TokenSpeed(_) => {
                 tracing::warn!("set_kv_transfer_params called on non-vLLM request, ignoring");
             }
         }
@@ -1659,7 +1681,7 @@ impl ProtoGenerateRequest {
             Self::Vllm(req) => req.data_parallel_rank = Some(rank),
             Self::Sglang(req) => req.data_parallel_rank = rank,
             Self::TokenSpeed(req) => req.data_parallel_rank = Some(rank),
-            Self::Trtllm(_) | Self::Mlx(_) => {}
+            Self::Trtllm(_) | Self::Mlx(_) | Self::DeepInfer(_) => {}
         }
     }
 
@@ -1684,6 +1706,10 @@ impl ProtoGenerateRequest {
                 Some(mlx::generate_request::Input::Tokenized(input)) => input.input_ids.len(),
                 _ => 0,
             },
+            Self::DeepInfer(req) => req
+                .tokenized
+                .as_ref()
+                .map_or(0, |input| input.input_ids.len()),
             Self::TokenSpeed(req) => req
                 .tokenized
                 .as_ref()
@@ -1698,9 +1724,11 @@ impl ProtoGenerateRequest {
                 req.media_refs = Some(refs);
                 Ok(())
             }
-            Self::Sglang(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => {
-                Err("media refs require a vLLM gRPC worker".to_string())
-            }
+            Self::Sglang(_)
+            | Self::Trtllm(_)
+            | Self::Mlx(_)
+            | Self::DeepInfer(_)
+            | Self::TokenSpeed(_) => Err("media refs require a vLLM gRPC worker".to_string()),
         }
     }
 
@@ -1740,7 +1768,7 @@ impl ProtoGenerateRequest {
             Self::Vllm(req) => req.sampling_params.as_ref().map(|p| p.n),
             Self::Sglang(req) => req.sampling_params.as_ref().map(|p| p.n),
             Self::TokenSpeed(req) => req.sampling_params.as_ref().map(|p| p.n),
-            Self::Trtllm(_) | Self::Mlx(_) => None,
+            Self::Trtllm(_) | Self::Mlx(_) | Self::DeepInfer(_) => None,
         };
         n.filter(|&n| n > 0).unwrap_or(1)
     }
@@ -1763,7 +1791,7 @@ impl ProtoGenerateRequest {
                     params.n = n;
                 }
             }
-            Self::Trtllm(_) | Self::Mlx(_) => {}
+            Self::Trtllm(_) | Self::Mlx(_) | Self::DeepInfer(_) => {}
         }
     }
 
@@ -1791,6 +1819,7 @@ impl ProtoGenerateRequest {
                     .then_some(guided.guide.as_str())
             }
             Self::Mlx(_) => None,
+            Self::DeepInfer(_) => None,
         }
     }
 
@@ -1835,6 +1864,7 @@ impl ProtoGenerateRequest {
                 }
             }
             Self::Mlx(_) => {}
+            Self::DeepInfer(_) => {}
         }
     }
 
@@ -1883,6 +1913,7 @@ impl ProtoGenerateRequest {
                 }
             }
             Self::Mlx(_) => {}
+            Self::DeepInfer(_) => {}
         }
     }
 
@@ -1927,6 +1958,7 @@ impl ProtoGenerateRequest {
                 }
             }
             Self::Mlx(_) => {}
+            Self::DeepInfer(_) => {}
         }
     }
 
@@ -1948,7 +1980,7 @@ impl ProtoGenerateRequest {
                         .map(|seed| seed.wrapping_add(u64::from(offset)));
                 }
             }
-            Self::Sglang(_) | Self::Trtllm(_) | Self::Mlx(_) => {}
+            Self::Sglang(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::DeepInfer(_) => {}
         }
     }
 
@@ -1958,7 +1990,7 @@ impl ProtoGenerateRequest {
             Self::Sglang(req) => req.mm_inputs.is_some(),
             Self::Vllm(req) => req.mm_inputs.is_some() || !req.extra_mm_inputs.is_empty(),
             Self::TokenSpeed(req) => req.mm_inputs.is_some(),
-            Self::Trtllm(_) | Self::Mlx(_) => false,
+            Self::Trtllm(_) | Self::Mlx(_) | Self::DeepInfer(_) => false,
         }
     }
 
@@ -1967,7 +1999,11 @@ impl ProtoGenerateRequest {
     pub fn set_kv_transfer_params_json(&mut self, json: String) {
         match self {
             Self::Vllm(req) => req.kv_transfer_params_json = Some(json),
-            Self::Sglang(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => {
+            Self::Sglang(_)
+            | Self::Trtllm(_)
+            | Self::Mlx(_)
+            | Self::DeepInfer(_)
+            | Self::TokenSpeed(_) => {
                 tracing::warn!("set_kv_transfer_params_json called on non-vLLM request, ignoring");
             }
         }
@@ -1980,7 +2016,11 @@ impl ProtoGenerateRequest {
             Self::Vllm(req) => {
                 req.kv_transfer_params_json.is_some() || req.kv_transfer_params.is_some()
             }
-            Self::Sglang(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => false,
+            Self::Sglang(_)
+            | Self::Trtllm(_)
+            | Self::Mlx(_)
+            | Self::DeepInfer(_)
+            | Self::TokenSpeed(_) => false,
         }
     }
 
@@ -2000,7 +2040,11 @@ impl ProtoGenerateRequest {
                     .collect();
                 req.encode_bootstrap_info = Some(tokenspeed::EncodeBootstrapInfo { items });
             }
-            Self::Sglang(_) | Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) => {
+            Self::Sglang(_)
+            | Self::Vllm(_)
+            | Self::Trtllm(_)
+            | Self::Mlx(_)
+            | Self::DeepInfer(_) => {
                 tracing::warn!(
                     "set_encode_bootstrap_info called on a backend without encode bootstrap info, ignoring"
                 );
@@ -2012,7 +2056,11 @@ impl ProtoGenerateRequest {
     pub(crate) fn clear_encode_bootstrap_info(&mut self) {
         match self {
             Self::TokenSpeed(req) => req.encode_bootstrap_info = None,
-            Self::Sglang(_) | Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) => {}
+            Self::Sglang(_)
+            | Self::Vllm(_)
+            | Self::Trtllm(_)
+            | Self::Mlx(_)
+            | Self::DeepInfer(_) => {}
         }
     }
 
@@ -2036,7 +2084,11 @@ impl ProtoGenerateRequest {
                     bootstrap_room,
                 });
             }
-            Self::Sglang(_) | Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) => {
+            Self::Sglang(_)
+            | Self::Vllm(_)
+            | Self::Trtllm(_)
+            | Self::Mlx(_)
+            | Self::DeepInfer(_) => {
                 tracing::warn!("set_kv_bootstrap_info called on non-TokenSpeed request, ignoring");
             }
         }
@@ -2049,6 +2101,7 @@ pub enum ProtoGenerateResponse {
     Vllm(Box<vllm::GenerateResponse>),
     Trtllm(Box<trtllm::GenerateResponse>),
     Mlx(Box<mlx::GenerateResponse>),
+    DeepInfer(Box<deepinfer::GenerateResponse>),
     TokenSpeed(Box<tokenspeed::GenerateResponse>),
 }
 
@@ -2084,6 +2137,13 @@ impl ProtoGenerateResponse {
             Self::Mlx(resp) => match resp.response.as_mut() {
                 Some(mlx::generate_response::Response::Chunk(chunk)) => chunk.index = index,
                 Some(mlx::generate_response::Response::Complete(complete)) => {
+                    complete.index = index;
+                }
+                None => {}
+            },
+            Self::DeepInfer(resp) => match resp.response.as_mut() {
+                Some(deepinfer::generate_response::Response::Chunk(chunk)) => chunk.index = index,
+                Some(deepinfer::generate_response::Response::Complete(complete)) => {
                     complete.index = index;
                 }
                 None => {}
@@ -2143,6 +2203,15 @@ impl ProtoGenerateResponse {
                 }
                 None => {}
             },
+            Self::DeepInfer(resp) => match resp.response.as_mut() {
+                Some(deepinfer::generate_response::Response::Chunk(chunk)) => {
+                    prefill.restamp(chunk.index, &mut chunk.cached_tokens);
+                }
+                Some(deepinfer::generate_response::Response::Complete(complete)) => {
+                    prefill.restamp(complete.index, &mut complete.cached_tokens);
+                }
+                None => {}
+            },
             Self::TokenSpeed(resp) => match resp.response.as_mut() {
                 Some(tokenspeed::generate_response::Response::Chunk(chunk)) => {
                     prefill.restamp(chunk.index, &mut chunk.cached_tokens);
@@ -2174,6 +2243,10 @@ impl ProtoGenerateResponse {
                 &resp.response,
                 Some(mlx::generate_response::Response::Complete(c)) if c.finish_reason == "error"
             ),
+            Self::DeepInfer(resp) => matches!(
+                &resp.response,
+                Some(deepinfer::generate_response::Response::Complete(c)) if c.finish_reason == "error"
+            ),
             Self::TokenSpeed(resp) => matches!(
                 &resp.response,
                 Some(tokenspeed::generate_response::Response::Complete(c)) if c.finish_reason == "error"
@@ -2203,6 +2276,11 @@ impl ProtoGenerateResponse {
             Self::Mlx(resp) => match &resp.response {
                 Some(mlx::generate_response::Response::Chunk(c)) => c.cached_tokens,
                 Some(mlx::generate_response::Response::Complete(c)) => c.cached_tokens,
+                None => 0,
+            },
+            Self::DeepInfer(resp) => match &resp.response {
+                Some(deepinfer::generate_response::Response::Chunk(c)) => c.cached_tokens,
+                Some(deepinfer::generate_response::Response::Complete(c)) => c.cached_tokens,
                 None => 0,
             },
             Self::TokenSpeed(resp) => match &resp.response {
@@ -2254,6 +2332,15 @@ impl ProtoGenerateResponse {
                 }
                 None => ProtoResponseVariant::None,
             },
+            Self::DeepInfer(resp) => match resp.response {
+                Some(deepinfer::generate_response::Response::Chunk(chunk)) => {
+                    ProtoResponseVariant::Chunk(ProtoGenerateStreamChunk::DeepInfer(chunk))
+                }
+                Some(deepinfer::generate_response::Response::Complete(complete)) => {
+                    ProtoResponseVariant::Complete(ProtoGenerateComplete::DeepInfer(complete))
+                }
+                None => ProtoResponseVariant::None,
+            },
             Self::TokenSpeed(resp) => match resp.response {
                 Some(tokenspeed::generate_response::Response::Chunk(chunk)) => {
                     ProtoResponseVariant::Chunk(ProtoGenerateStreamChunk::TokenSpeed(chunk))
@@ -2281,6 +2368,7 @@ pub enum ProtoGenerateStreamChunk {
     Vllm(vllm::GenerateStreamChunk),
     Trtllm(trtllm::GenerateStreamChunk),
     Mlx(mlx::GenerateStreamChunk),
+    DeepInfer(deepinfer::GenerateStreamChunk),
     TokenSpeed(tokenspeed::GenerateStreamChunk),
 }
 
@@ -2346,9 +2434,11 @@ impl ProtoGenerateStreamChunk {
     pub fn chunk_semantics(&self) -> ChunkSemantics {
         match self {
             Self::Vllm(_) => ChunkSemantics::Delta,
-            Self::Sglang(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => {
-                ChunkSemantics::Cumulative
-            }
+            Self::Sglang(_)
+            | Self::Trtllm(_)
+            | Self::Mlx(_)
+            | Self::DeepInfer(_)
+            | Self::TokenSpeed(_) => ChunkSemantics::Cumulative,
         }
     }
 
@@ -2359,6 +2449,7 @@ impl ProtoGenerateStreamChunk {
             Self::Vllm(c) => &c.token_ids,
             Self::Trtllm(c) => &c.token_ids,
             Self::Mlx(c) => &c.token_ids,
+            Self::DeepInfer(c) => &c.token_ids,
             Self::TokenSpeed(c) => &c.token_ids,
         }
     }
@@ -2371,6 +2462,7 @@ impl ProtoGenerateStreamChunk {
             Self::Vllm(c) => c.index,
             Self::Trtllm(c) => c.sequence_index,
             Self::Mlx(c) => c.index,
+            Self::DeepInfer(c) => c.index,
             Self::TokenSpeed(c) => c.index,
         }
     }
@@ -2388,6 +2480,10 @@ impl ProtoGenerateStreamChunk {
                 .map(|lp| convert_output_logprobs!(lp)),
             Self::Trtllm(c) => convert_trtllm_output_logprobs(&c.logprobs),
             Self::Mlx(c) => c
+                .output_logprobs
+                .as_ref()
+                .map(|lp| convert_output_logprobs!(lp)),
+            Self::DeepInfer(c) => c
                 .output_logprobs
                 .as_ref()
                 .map(|lp| convert_output_logprobs!(lp)),
@@ -2410,7 +2506,7 @@ impl ProtoGenerateStreamChunk {
                 .as_ref()
                 .map(|lp| convert_input_logprobs!(lp)),
             // TRT-LLM, MLX, and TokenSpeed streaming chunks don't have input_logprobs
-            Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => None,
+            Self::Trtllm(_) | Self::Mlx(_) | Self::DeepInfer(_) | Self::TokenSpeed(_) => None,
         }
     }
 
@@ -2421,6 +2517,7 @@ impl ProtoGenerateStreamChunk {
             Self::Vllm(c) => c.prompt_tokens,
             Self::Trtllm(c) => c.prompt_tokens,
             Self::Mlx(c) => c.prompt_tokens,
+            Self::DeepInfer(c) => c.prompt_tokens,
             Self::TokenSpeed(c) => c.prompt_tokens,
         }
     }
@@ -2432,6 +2529,7 @@ impl ProtoGenerateStreamChunk {
             Self::Vllm(c) => c.completion_tokens,
             Self::Trtllm(c) => c.completion_tokens,
             Self::Mlx(c) => c.completion_tokens,
+            Self::DeepInfer(c) => c.completion_tokens,
             Self::TokenSpeed(c) => c.completion_tokens,
         }
     }
@@ -2443,6 +2541,7 @@ impl ProtoGenerateStreamChunk {
             Self::Vllm(c) => c.cached_tokens,
             Self::Trtllm(c) => c.cached_tokens,
             Self::Mlx(c) => c.cached_tokens,
+            Self::DeepInfer(c) => c.cached_tokens,
             Self::TokenSpeed(c) => c.cached_tokens,
         }
     }
@@ -2451,7 +2550,11 @@ impl ProtoGenerateStreamChunk {
     pub fn reasoning_tokens(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.reasoning_tokens,
-            Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => 0,
+            Self::Vllm(_)
+            | Self::Trtllm(_)
+            | Self::Mlx(_)
+            | Self::DeepInfer(_)
+            | Self::TokenSpeed(_) => 0,
         }
     }
 
@@ -2463,7 +2566,11 @@ impl ProtoGenerateStreamChunk {
                 .weight_version
                 .as_deref()
                 .filter(|v| is_reported_version(v)),
-            Self::Sglang(_) | Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) => None,
+            Self::Sglang(_)
+            | Self::Vllm(_)
+            | Self::Trtllm(_)
+            | Self::Mlx(_)
+            | Self::DeepInfer(_) => None,
         }
     }
 }
@@ -2486,6 +2593,7 @@ pub enum ProtoGenerateComplete {
     Vllm(Box<vllm::GenerateComplete>),
     Trtllm(trtllm::GenerateComplete),
     Mlx(mlx::GenerateComplete),
+    DeepInfer(deepinfer::GenerateComplete),
     TokenSpeed(tokenspeed::GenerateComplete),
 }
 
@@ -2564,9 +2672,11 @@ impl ProtoGenerateComplete {
     pub fn chunk_semantics(&self) -> ChunkSemantics {
         match self {
             Self::Vllm(_) => ChunkSemantics::Delta,
-            Self::Sglang(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => {
-                ChunkSemantics::Cumulative
-            }
+            Self::Sglang(_)
+            | Self::Trtllm(_)
+            | Self::Mlx(_)
+            | Self::DeepInfer(_)
+            | Self::TokenSpeed(_) => ChunkSemantics::Cumulative,
         }
     }
 
@@ -2577,6 +2687,7 @@ impl ProtoGenerateComplete {
             Self::Vllm(c) => &c.output_ids,
             Self::Trtllm(c) => &c.output_token_ids,
             Self::Mlx(c) => &c.output_ids,
+            Self::DeepInfer(c) => &c.output_ids,
             Self::TokenSpeed(c) => &c.output_ids,
         }
     }
@@ -2588,6 +2699,7 @@ impl ProtoGenerateComplete {
             Self::Vllm(c) => c.prompt_tokens,
             Self::Trtllm(c) => c.prompt_tokens,
             Self::Mlx(c) => c.prompt_tokens,
+            Self::DeepInfer(c) => c.prompt_tokens,
             Self::TokenSpeed(c) => c.prompt_tokens,
         }
     }
@@ -2599,6 +2711,7 @@ impl ProtoGenerateComplete {
             Self::Vllm(c) => c.completion_tokens,
             Self::Trtllm(c) => c.completion_tokens,
             Self::Mlx(c) => c.completion_tokens,
+            Self::DeepInfer(c) => c.completion_tokens,
             Self::TokenSpeed(c) => c.completion_tokens,
         }
     }
@@ -2610,6 +2723,7 @@ impl ProtoGenerateComplete {
             Self::Vllm(c) => &c.finish_reason,
             Self::Trtllm(c) => &c.finish_reason,
             Self::Mlx(c) => &c.finish_reason,
+            Self::DeepInfer(c) => &c.finish_reason,
             Self::TokenSpeed(c) => &c.finish_reason,
         }
     }
@@ -2622,6 +2736,7 @@ impl ProtoGenerateComplete {
             Self::Vllm(c) => c.index,
             Self::Trtllm(c) => c.sequence_index,
             Self::Mlx(c) => c.index,
+            Self::DeepInfer(c) => c.index,
             Self::TokenSpeed(c) => c.index,
         }
     }
@@ -2660,6 +2775,9 @@ impl ProtoGenerateComplete {
             Self::Mlx(c) => c
                 .matched_stop_token_id
                 .map(|id| serde_json::Value::Number(id.into())),
+            Self::DeepInfer(c) => c
+                .matched_stop_token_id
+                .map(|id| serde_json::Value::Number(id.into())),
             Self::TokenSpeed(c) => convert!(
                 &c.matched_stop,
                 TokenSpeedMatchedStop::MatchedTokenId,
@@ -2675,6 +2793,7 @@ impl ProtoGenerateComplete {
             Self::Vllm(c) => &c.output_ids,
             Self::Trtllm(c) => &c.output_token_ids,
             Self::Mlx(c) => &c.output_ids,
+            Self::DeepInfer(c) => &c.output_ids,
             Self::TokenSpeed(c) => &c.output_ids,
         }
     }
@@ -2686,6 +2805,7 @@ impl ProtoGenerateComplete {
             Self::Vllm(c) => c.cached_tokens,
             Self::Trtllm(c) => c.cached_tokens,
             Self::Mlx(c) => c.cached_tokens,
+            Self::DeepInfer(c) => c.cached_tokens,
             Self::TokenSpeed(c) => c.cached_tokens,
         }
     }
@@ -2694,7 +2814,11 @@ impl ProtoGenerateComplete {
     pub fn reasoning_tokens(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.reasoning_tokens,
-            Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => 0,
+            Self::Vllm(_)
+            | Self::Trtllm(_)
+            | Self::Mlx(_)
+            | Self::DeepInfer(_)
+            | Self::TokenSpeed(_) => 0,
         }
     }
 
@@ -2706,7 +2830,11 @@ impl ProtoGenerateComplete {
                 .weight_version
                 .as_deref()
                 .filter(|v| is_reported_version(v)),
-            Self::Sglang(_) | Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) => None,
+            Self::Sglang(_)
+            | Self::Vllm(_)
+            | Self::Trtllm(_)
+            | Self::Mlx(_)
+            | Self::DeepInfer(_) => None,
         }
     }
 
@@ -2718,6 +2846,7 @@ impl ProtoGenerateComplete {
             Self::Trtllm(c) => c.spec_accepted_tokens,
             Self::TokenSpeed(c) => c.spec_accepted_tokens,
             Self::Mlx(_) => 0,
+            Self::DeepInfer(_) => 0,
         }
     }
 
@@ -2729,6 +2858,7 @@ impl ProtoGenerateComplete {
             Self::Trtllm(c) => c.spec_draft_tokens,
             Self::TokenSpeed(c) => c.spec_draft_tokens,
             Self::Mlx(_) => 0,
+            Self::DeepInfer(_) => 0,
         }
     }
 
@@ -2768,7 +2898,7 @@ impl ProtoGenerateComplete {
                 }
             }
             // MLX and TokenSpeed do not have input_logprobs
-            Self::Mlx(_) | Self::TokenSpeed(_) => None,
+            Self::Mlx(_) | Self::DeepInfer(_) | Self::TokenSpeed(_) => None,
         }
     }
 
@@ -2788,6 +2918,10 @@ impl ProtoGenerateComplete {
                 .output_logprobs
                 .as_ref()
                 .map(|lp| convert_output_logprobs!(lp)),
+            Self::DeepInfer(c) => c
+                .output_logprobs
+                .as_ref()
+                .map(|lp| convert_output_logprobs!(lp)),
             Self::TokenSpeed(c) => c
                 .output_logprobs
                 .as_ref()
@@ -2803,7 +2937,11 @@ impl ProtoGenerateComplete {
                 .kv_transfer_params
                 .as_ref()
                 .map(|params| (params.remote_host.clone(), params.remote_port)),
-            Self::Sglang(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => None,
+            Self::Sglang(_)
+            | Self::Trtllm(_)
+            | Self::Mlx(_)
+            | Self::DeepInfer(_)
+            | Self::TokenSpeed(_) => None,
         }
     }
 
@@ -2812,7 +2950,11 @@ impl ProtoGenerateComplete {
     pub fn media_identity(&self) -> Option<&vllm::MediaIdentity> {
         match self {
             Self::Vllm(c) => c.media_identity.as_ref(),
-            Self::Sglang(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => None,
+            Self::Sglang(_)
+            | Self::Trtllm(_)
+            | Self::Mlx(_)
+            | Self::DeepInfer(_)
+            | Self::TokenSpeed(_) => None,
         }
     }
 
@@ -2823,7 +2965,11 @@ impl ProtoGenerateComplete {
                 .kv_transfer_params_json
                 .as_deref()
                 .filter(|s| !s.is_empty()),
-            Self::Sglang(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => None,
+            Self::Sglang(_)
+            | Self::Trtllm(_)
+            | Self::Mlx(_)
+            | Self::DeepInfer(_)
+            | Self::TokenSpeed(_) => None,
         }
     }
 }
@@ -2838,6 +2984,7 @@ pub enum ProtoStream {
     Vllm(VllmStream),
     Trtllm(TrtllmStream),
     Mlx(MlxStream),
+    DeepInfer(DeepInferStream),
     TokenSpeed(TokenSpeedStream),
     /// ZMQ backend: a custom stream yielding vLLM-proto responses built from
     /// EngineCore outputs. Auto-aborts on drop, so `mark_completed` is a no-op.
@@ -3600,6 +3747,10 @@ impl ProtoStream {
                 .next()
                 .await
                 .map(|result| result.map(|r| ProtoGenerateResponse::Mlx(Box::new(r)))),
+            Self::DeepInfer(stream) => stream
+                .next()
+                .await
+                .map(|result| result.map(|r| ProtoGenerateResponse::DeepInfer(Box::new(r)))),
             Self::TokenSpeed(stream) => stream
                 .next()
                 .await
@@ -3632,6 +3783,7 @@ impl ProtoStream {
             Self::Vllm(stream) => stream.mark_completed(),
             Self::Trtllm(stream) => stream.mark_completed(),
             Self::Mlx(stream) => stream.mark_completed(),
+            Self::DeepInfer(stream) => stream.mark_completed(),
             Self::TokenSpeed(stream) => stream.mark_completed(),
             Self::Zmq(stream) => stream.mark_completed(),
             Self::Fanout(stream) => stream.mark_completed(),
@@ -3655,6 +3807,7 @@ impl ProtoStream {
             Self::Vllm(stream) => Self::Vllm(stream.defer_abort_until_first_item()),
             Self::Trtllm(stream) => Self::Trtllm(stream.defer_abort_until_first_item()),
             Self::Mlx(stream) => Self::Mlx(stream.defer_abort_until_first_item()),
+            Self::DeepInfer(stream) => Self::DeepInfer(stream.defer_abort_until_first_item()),
             Self::TokenSpeed(stream) => Self::TokenSpeed(stream.defer_abort_until_first_item()),
             Self::Zmq(stream) => Self::Zmq(stream),
             Self::Fanout(stream) => Self::Fanout(stream.defer_abort_until_first_item()),

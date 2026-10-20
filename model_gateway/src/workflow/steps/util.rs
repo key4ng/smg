@@ -117,11 +117,11 @@ pub(crate) async fn do_grpc_health_check(
 
 /// Dial the endpoint once to decide whether it is worth probing per-runtime.
 ///
-/// All five runtime clients dial the same authority, so an endpoint that
-/// cannot be reached at the transport level fails five identical connects.
+/// All six runtime clients dial the same authority, so an endpoint that
+/// cannot be reached at the transport level fails six identical connects.
 /// One dial answers that question, which matters during a mass worker
 /// registration: an unready pod that black-holes SYN would otherwise hold
-/// five in-flight sockets per attempt instead of one.
+/// six in-flight sockets per attempt instead of one.
 async fn grpc_transport_reachable(grpc_url: &str, timeout_secs: u64) -> Result<(), String> {
     let timeout = Duration::from_secs(timeout_secs);
     let connect_future = connect_channel_with_timeout(grpc_url, timeout);
@@ -135,7 +135,8 @@ async fn grpc_transport_reachable(grpc_url: &str, timeout_secs: u64) -> Result<(
     Ok(())
 }
 
-const GRPC_RUNTIME_TYPES: [&str; 5] = ["sglang", "vllm", "trtllm", "mlx", "tokenspeed"];
+const GRPC_RUNTIME_TYPES: [&str; 6] =
+    ["sglang", "vllm", "trtllm", "mlx", "tokenspeed", "deepinfer"];
 
 async fn first_success_or_all_errors<F>(
     mut checks: FuturesUnordered<F>,
@@ -179,7 +180,7 @@ where
 /// We just need to know: does this endpoint speak gRPC at all?
 ///
 /// The per-runtime fan-out is gated behind a single transport probe so an
-/// unreachable endpoint costs one connect rather than five.
+/// unreachable endpoint costs one connect rather than six.
 /// The remaining runtime probes are cancelled after the first success.
 /// `timeout_secs` bounds the gate and fan-out together, not each phase.
 pub(crate) async fn try_grpc_reachable(url: &str, timeout_secs: u64) -> Result<(), String> {
@@ -307,7 +308,7 @@ mod tests {
 
     /// An endpoint that cannot be reached at the transport level must
     /// short-circuit before the per-runtime fan-out, so one unreachable worker
-    /// costs one dial rather than five.
+    /// costs one dial rather than six.
     ///
     /// TCP port 0 cannot be owned by a listener: binding it asks the OS for an
     /// ephemeral nonzero port. This makes the local transport failure
@@ -328,7 +329,7 @@ mod tests {
             !err.contains("gRPC not reachable"),
             "fan-out aggregate was produced, so the gate did not short-circuit: {err}"
         );
-        for runtime in ["sglang", "vllm", "trtllm", "mlx", "tokenspeed"] {
+        for runtime in GRPC_RUNTIME_TYPES {
             assert!(
                 !err.contains(runtime),
                 "error names {runtime}, so a per-runtime probe ran: {err}"

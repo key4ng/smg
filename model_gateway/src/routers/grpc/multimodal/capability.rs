@@ -206,7 +206,8 @@ fn unsupported_modality_message(runtimes: &[RuntimeType], modality: Modality) ->
 /// - ImageEmbeds: TokenSpeed only (pre-computed embeddings are an EPD feature)
 /// - Video: vLLM, TokenSpeed
 /// - Audio: TokenSpeed
-/// - MLX: none
+/// - MLX, DeepInfer: none (DeepInfer takes images, but this gateway does not
+///   send them to it yet)
 ///
 /// `Modality::ImageEmbeds` cannot actually reach either check today because a
 /// plan's parts and a [`crate::routers::grpc::multimodal::MediaBatch`] only
@@ -310,7 +311,7 @@ mod tests {
     #[test]
     fn capability_matrix_matches_backend_support() {
         use Modality::{Audio, Image, ImageEmbeds, Video};
-        use RuntimeType::{Mlx, Sglang, TokenSpeed, Trtllm, Vllm};
+        use RuntimeType::{DeepInfer, Mlx, Sglang, TokenSpeed, Trtllm, Vllm};
 
         // (runtime, modality, expected_supported)
         let cases = [
@@ -329,12 +330,16 @@ mod tests {
             (Mlx, Image, false),
             (Mlx, Video, false),
             (Mlx, Audio, false),
+            (DeepInfer, Image, false),
+            (DeepInfer, Video, false),
+            (DeepInfer, Audio, false),
             // ImageEmbeds is a TokenSpeed-only EPD feature.
             (Sglang, ImageEmbeds, false),
             (Vllm, ImageEmbeds, false),
             (Trtllm, ImageEmbeds, false),
             (TokenSpeed, ImageEmbeds, true),
             (Mlx, ImageEmbeds, false),
+            (DeepInfer, ImageEmbeds, false),
         ];
 
         for (runtime, modality, expected) in cases {

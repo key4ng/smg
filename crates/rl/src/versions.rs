@@ -184,7 +184,8 @@ mod tests {
     fn a_worker_that_went_down_since_the_refit_reports_its_registration_metadata() {
         let w = worker("w1", "http://a:1", RuntimeType::Sglang);
         let versions = super::ReportedVersions::default();
-        versions.record(std::slice::from_ref(&w), std::slice::from_ref(&w), &[&w], "7");
+        let registry = std::slice::from_ref(&w);
+        versions.record(registry, registry, &[&w], "7");
         let mut back = w.clone();
         back.downs = 1;
 
@@ -199,7 +200,8 @@ mod tests {
     fn a_worker_replaced_since_the_refit_reports_its_new_metadata() {
         let w = worker("w1", "http://a:1", RuntimeType::Sglang);
         let versions = super::ReportedVersions::default();
-        versions.record(std::slice::from_ref(&w), std::slice::from_ref(&w), &[&w], "7");
+        let registry = std::slice::from_ref(&w);
+        versions.record(registry, registry, &[&w], "7");
         let mut replaced = w.clone();
         replaced.revision = 1;
 
@@ -260,7 +262,8 @@ mod tests {
         };
         let ((first_status, _), (second_status, _)) = tokio::join!(refit, joiner);
 
-        assert_eq!((first_status, second_status), (StatusCode::OK, StatusCode::OK));
+        assert_eq!(first_status, StatusCode::OK);
+        assert_eq!(second_status, StatusCode::OK);
         assert_eq!(reported(&app, "w1").await, "7");
         assert_eq!(reported(&app, "w2").await, "8");
     }

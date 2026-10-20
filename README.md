@@ -84,7 +84,7 @@ That's it. SMG is now load-balancing requests across your workers.
 
 | | |
 |:--|:--|
-| **Self-Hosted Engines** | vLLM · SGLang · TokenSpeed · TensorRT-LLM · MLX (Apple Silicon) · any OpenAI-compatible server (e.g. Ollama) |
+| **Self-Hosted Engines** | vLLM · SGLang · TokenSpeed · TensorRT-LLM · MLX (Apple Silicon) · DeepInfer · any OpenAI-compatible server (e.g. Ollama) |
 | **Cloud Providers** | OpenAI · Anthropic · Google Gemini · xAI · OCI Generative AI · AWS Bedrock · Azure OpenAI · any OpenAI-compatible provider (Groq, Together, …) |
 
 ## Features

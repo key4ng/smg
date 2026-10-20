@@ -1,4 +1,4 @@
-"""SMG gRPC Proto - Protocol definitions for SGLang, TokenSpeed, vLLM, TRT-LLM, and MLX."""
+"""SMG gRPC Proto - Protocol definitions for SGLang, TokenSpeed, vLLM, TRT-LLM, MLX, and DeepInfer."""
 
 from importlib import import_module
 from importlib.metadata import version
@@ -20,6 +20,8 @@ _GENERATED_MODULES = {
     "trtllm_service_pb2_grpc",
     "mlx_engine_pb2",
     "mlx_engine_pb2_grpc",
+    "deepinfer_engine_pb2",
+    "deepinfer_engine_pb2_grpc",
 }
 
 __all__ = sorted(_GENERATED_MODULES)

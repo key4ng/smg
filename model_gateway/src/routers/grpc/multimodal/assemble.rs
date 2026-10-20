@@ -108,6 +108,9 @@ async fn assemble_multimodal_data_impl(
         BackendClient::Grpc(GrpcClient::Mlx(_)) => {
             anyhow::bail!("MLX does not support multimodal inputs")
         }
+        BackendClient::Grpc(GrpcClient::DeepInfer(_)) => {
+            anyhow::bail!("DeepInfer multimodal inputs are not supported yet")
+        }
         BackendClient::Zmq(client) => match client.runtime() {
             // connect() admits only vLLM/TokenSpeed runtimes over ZMQ, so no
             // Unspecified fallback: anything else is a hard error below.

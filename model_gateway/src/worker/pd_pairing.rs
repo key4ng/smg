@@ -331,6 +331,7 @@ fn profile_of(spec: &WorkerSpec, transport_known: bool) -> Option<KvTransferProf
         }
         RuntimeType::Trtllm
         | RuntimeType::Mlx
+        | RuntimeType::DeepInfer
         | RuntimeType::Generic
         | RuntimeType::External
         | RuntimeType::Unspecified => None,
@@ -385,6 +386,7 @@ fn transport_of(spec: &WorkerSpec) -> Option<String> {
         ),
         RuntimeType::Trtllm
         | RuntimeType::Mlx
+        | RuntimeType::DeepInfer
         | RuntimeType::Generic
         | RuntimeType::External
         | RuntimeType::Unspecified => None,

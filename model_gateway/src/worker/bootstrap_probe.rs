@@ -94,6 +94,7 @@ pub(crate) fn effective_bootstrap_port(worker: &dyn Worker) -> Option<(u16, Boot
             | RuntimeType::TokenSpeed
             | RuntimeType::Trtllm
             | RuntimeType::Mlx
+            | RuntimeType::DeepInfer
             | RuntimeType::Generic
             | RuntimeType::External
             | RuntimeType::Unspecified => true,

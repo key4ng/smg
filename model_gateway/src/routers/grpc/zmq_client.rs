@@ -27,9 +27,11 @@ pub(crate) async fn generate(
         ProtoGenerateRequest::Vllm(req) => client.generate_vllm(*req).await,
         ProtoGenerateRequest::TokenSpeed(req) => client.generate_tokenspeed(*req).await,
         ProtoGenerateRequest::Sglang(req) => client.generate_sglang(*req).await,
-        ProtoGenerateRequest::Trtllm(_) | ProtoGenerateRequest::Mlx(_) => Err(
-            tonic::Status::internal("ZMQ backends serve vLLM, TokenSpeed and SGLang requests only"),
-        ),
+        ProtoGenerateRequest::Trtllm(_)
+        | ProtoGenerateRequest::Mlx(_)
+        | ProtoGenerateRequest::DeepInfer(_) => Err(tonic::Status::internal(
+            "ZMQ backends serve vLLM, TokenSpeed and SGLang requests only",
+        )),
     }
 }
 
